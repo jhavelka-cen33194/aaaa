@@ -1,0 +1,38 @@
+name: Pre-commit Update
+
+on:
+  schedule:
+    - cron: 0 12 * * *
+  workflow_dispatch:
+
+jobs:
+  update:
+    name: pre-commit autoupdate
+    runs-on: csas-linux
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Checkout
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Setup
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      # Auto-update
+      - name: Initialize
+        run: pre-commit autoupdate
+
+      # Create PR if needed
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          title: "ci(pre-commit): updated pre-commit modules on ${{ github.ref_name }}"
+          commit-message: "ci(pre-commit): updated pre-commit modules"
+          body: "Updated pre-commit repos to latest versions"
+          branch: pre-commit-update/${{ github.ref_name }}
+          delete-branch: true
+          labels: bot,ci

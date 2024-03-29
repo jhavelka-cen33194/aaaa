@@ -1,0 +1,8 @@
+apiVersion: laf.csas.cz/v1
+kind: WeblogicApplication
+metadata:
+  # name: java-app-weblogic
+spec:
+  source:
+    # repoURL: https://artifactory.csin.cz/artifactory/cicd-samples-maven-releases-local/cz/csas/cicd/samples/java-app-weblogic/0.1.2/java-app-weblogic-0.1.2.war
+    # targetRevision: 0.1.2

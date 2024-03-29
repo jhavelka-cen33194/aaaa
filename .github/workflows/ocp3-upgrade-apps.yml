@@ -1,0 +1,178 @@
+# IMPORTANT: This is reusable workflow, not executed directly on this repository. It MUST not be renamed, it is an integration point.
+
+name: OCP3 Helm upgrade
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        description: GitHub deployment environment. Must be configured in GitHub repository Settings.
+        required: true
+      sas:
+        type: string
+        description: SAS in lower-snake-case, target OpenShift namespace prefix.
+        required: true
+      openshift-server:
+        type: string
+        description: >-
+          OpenShift server url, e.g. https://xn-master.vs.csin.cz:8443.
+          If the environment uses standard names, like deva, pred, prod, this can be omitted.
+      dir:
+        type: string
+        description: Root directory, where files are located. Default is current directory.
+      files:
+        type: string
+        description: Optional glob pattern, a multiline list.
+      recursive:
+        type: boolean
+        description: Turns on recursive search of the dir. Unused when files input is used.
+        default: false
+      timeout:
+        type: string
+        description: Helm upgrade wait timeout. Default is 5m.
+        default: 5m
+      max-parallel:
+        type: number
+        description: Max parallel deployments, default is 2.
+        default: 2
+    secrets:
+      ARTIFACTORY_USERNAME:
+        required: true
+      ARTIFACTORY_ACCESS_TOKEN:
+        required: true
+      OPENSHIFT_TOKEN:
+        required: true
+      OPENSHIFT_CA:
+        required: true
+
+jobs:
+  meta:
+    name: Find Apps
+    runs-on: csas-linux
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      apps: ${{ steps.meta.outputs.apps }}
+      namespace: ${{ steps.namespace.outputs.namespace }}
+      env-type: ${{ steps.env.outputs.type }}
+      openshift-server: ${{ steps.server.outputs.url }}
+    env:
+      OPENSHIFT_SERVERS: |-
+        {
+          "dev": "https://xn-master.vs.csin.cz:8443",
+          "pred": "https://xt-master.vs.csin.cz:8443",
+          "prod": "https://xp-master.vs.csin.cz:8443"
+        }
+    steps:
+      # Checkout
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Find apps
+      - name: Read metadata
+        id: meta
+        uses: csas-actions/read-app-metadata@v2 # x-release-please-major
+        with:
+          dir: ${{ inputs.dir }}
+          recursive: ${{ inputs.recursive }}
+          files: ${{ inputs.files }}
+
+      # Namespace
+      - name: Get namespace
+        id: namespace
+        run: |-
+          echo "namespace=$SAS-${GITHUB_REF_NAME/env\//}" >>$GITHUB_OUTPUT
+        env:
+          SAS: ${{ inputs.sas }}
+
+      # Determine environment type
+      - name: Get environment type
+        id: env
+        run: |-
+          # strip env/ prefix
+          case "${ENVIRONMENT/env\//}" in
+            dev* | sys | int | prs)
+              echo "type=dev" >>$GITHUB_OUTPUT
+              ;;
+            pred)
+              echo "type=prod" >>$GITHUB_OUTPUT
+              ;;
+            prod)
+              echo "type=prod" >>$GITHUB_OUTPUT
+              ;;
+            *)
+              echo "type=unknown" >>$GITHUB_OUTPUT
+              ;;
+          esac
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+
+      # Determine OpenShift server
+      - name: Get OpenShift server URL
+        id: server
+        run: |-
+          if [ -z "$OPENSHIFT_SERVER" ]; then
+            echo "Could not determine OpenShift server URL"
+            exit 2
+          fi
+
+          echo "url=$OPENSHIFT_SERVER" >>$GITHUB_OUTPUT
+        env:
+          OPENSHIFT_SERVER: ${{ inputs.openshift-server || fromJSON(env.OPENSHIFT_SERVERS)[steps.env.outputs.type] }}
+
+  helm-upgrade:
+    name: Helm upgrade ${{ matrix.app.file }}
+    needs:
+      - meta
+    runs-on: ${{ needs.meta.outputs.env-type == 'prod' && 'csas-linux-prod' || 'csas-linux' }}
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ needs.meta.outputs.openshift-server }}/console/project/${{ needs.meta.outputs.namespace }}/browse/deployments
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.max-parallel }}
+      matrix:
+        app: ${{ fromJSON(needs.meta.outputs.apps) }}
+    steps:
+      # Info
+      - name: Info
+        run: echo "$JSON"
+        env:
+          JSON: ${{ toJSON(matrix.app) }}
+
+      # Setup
+      - name: Artifactory login
+        uses: csas-actions/artifactory-login@v1
+        with:
+          username: ${{ secrets.ARTIFACTORY_USERNAME }}
+          password: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+
+      - name: OpenShift Login
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ needs.meta.outputs.openshift-server }}
+          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
+          certificate_authority_data: ${{ secrets.OPENSHIFT_CA }}
+          namespace: ${{ needs.meta.outputs.namespace }}
+
+      # Helm update
+      - name: Helm update
+        run: helm repo update
+
+      # Deploy
+      - name: Deploy
+        run: |-
+          echo "$VALUES" > /tmp/app-values.yaml
+          helm upgrade --install "$NAME" "$REPO/$CHART" --version "$VERSION" -n "$NAMESPACE" -f /tmp/app-values.yaml --wait --timeout "$TIMEOUT"
+        env:
+          NAME: ${{ matrix.app.name }}
+          REPO: ${{ matrix.app.repoName }}
+          CHART: ${{ matrix.app.chart }}
+          VERSION: ${{ matrix.app.version }}
+          VALUES: ${{ matrix.app.values }}
+          NAMESPACE: ${{ needs.meta.outputs.namespace }}
+          TIMEOUT: ${{ inputs.timeout }}

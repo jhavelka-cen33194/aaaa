@@ -1,0 +1,10 @@
+CODEOWNERS                  @csas-actions/artifactory_login_adm
+.github/                    @csas-actions/artifactory_login_adm
+.pre-commit-config.yaml     @csas-actions/artifactory_login_adm
+.gitattributes              @csas-actions/artifactory_login_adm
+.gitmodules                 @csas-actions/artifactory_login_adm
+action.yml                  @csas-actions/artifactory_login_adm
+tsconfig.json               @csas-actions/artifactory_login_adm
+jest.config.*               @csas-actions/artifactory_login_adm
+.eslint*                    @csas-actions/artifactory_login_adm
+.prettier*                  @csas-actions/artifactory_login_adm

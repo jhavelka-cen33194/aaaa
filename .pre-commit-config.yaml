@@ -1,0 +1,45 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+repos:
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.1.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [ commit-msg ]
+        args: [ ] # optional: list of Conventional Commits types to allow e.g. [feat, fix, ci, chore, test]
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^dist/
+      - id: end-of-file-fixer
+        exclude: ^dist/
+      - id: check-yaml
+        exclude: /fixtures/invalid.yml$
+      - id: check-json
+      - id: check-added-large-files
+        exclude: ^dist/.*\.js(\.map)?$
+      - id: check-shebang-scripts-are-executable
+      - id: forbid-new-submodules
+      - id: check-case-conflict
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.39.0
+    hooks:
+      - id: markdownlint
+        exclude: ^CHANGELOG.md
+  - repo: https://github.com/pre-commit/mirrors-eslint
+    rev: v9.0.0-beta.1
+    hooks:
+      - id: eslint
+        files: \.[jt]sx?$  # *.js, *.jsx, *.ts and *.tsx
+        exclude: ^test/fixtures/|^dist/
+        types: [ file ]
+        additional_dependencies:
+          - eslint
+          - jest
+          - eslint-plugin-github
+          - eslint-plugin-jest
+          - '@typescript-eslint/parser'
