@@ -1,0 +1,163 @@
+name: Validate state of deploing application
+
+#The workflow is triggered on push events to branches that match the pattern 'env/*' and 
+#  when files matching the pattern '**/ocp4s*/manifest-*.ya?ml' are changed.
+on:
+  push:
+    branches:
+      - 'env/*'
+    paths:
+      - '**/ocp4s*/manifest-*.ya?ml'
+
+concurrency: ci-${{ github.ref_name }}
+
+jobs:
+    deploy:
+      secrets: inherit
+      uses: ./.github/workflows/validate-k8s.yml
+
+    cho:
+      needs:
+        - deploy
+      uses: csas-actions/devops-platform-cd-common/.github/workflows/close-change-order.yml@master
+      with:
+        result: ${{ needs.deploy.result }}
+
+    findingModifiedMaifest:
+      outputs:
+        data: ${{ steps.manifest.outputs.manifests }}
+      needs: deploy
+      runs-on:
+        - csas-linux
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 2
+
+        - name: Find changed manifest files
+          id: manifest
+          run: |
+            # Extracts the modified manifest files from the git diff and converts them to JSON format using jq.
+            #    git diff 
+            #       ignore files which was deleted
+            #       print only name of changed files
+            # shellcheck disable=SC2016
+            JSON=$(git diff --diff-filter=d --name-only HEAD^ | grep "manifest-.*\.ya\?ml$" | xargs jq -c -n '$ARGS.positional' --args --)
+            echo "::debug::modified manifest files JSON: $JSON"
+            echo "manifests=$JSON" >> "$GITHUB_OUTPUT"
+
+    # Use the list of modified manifests and run postman tests on affected applications
+    runPostmanTests:
+      needs: findingModifiedMaifest
+      if: needs.findingModifiedMaifest.outputs.data != '[]'
+      strategy:
+        max-parallel: 4
+        matrix: 
+          manifest: ${{ fromJson(needs.findingModifiedMaifest.outputs.data) }}
+      uses: csas-ops/inet-ghb-actions/.github/workflows/newman-test-2.yml@master
+      with:
+        ENVIRONMENT: ${{ github.ref_name }}
+        REPOSITORY-NAME: inet-tests
+        REPO-TESTS-SUBDIR: postman
+        PLATFORM: ocp4
+        COLLECTION-NAME: ${{ matrix.manifest }}
+        SAFE-FULL: safe
+        USE-BETA-RUNNER: false
+      secrets:
+        TESTS_REPO_KEY: ${{ secrets.INET_TESTS_DEPLOY_KEY }}
+
+    getPlatformAndConfigServerLabel:
+      #github.ref_name - use in github
+      #github.ref - use on act, because github.ref_name is not available for act
+      if: (github.ref_name == 'env/BRANCH_NAME_NAHRAD' || github.ref_name == 'env/prod') || ( github.actor == 'nektos/act' && (github.ref == 'env/BRANCH_NAME_NAHRAD' || github.ref == 'env/prod'))
+      name: Get Platform and ConfigServer label
+      needs: findingModifiedMaifest
+      permissions: read-all
+      strategy:
+        matrix:
+           manifest: ${{ fromJson(needs.findingModifiedMaifest.outputs.data) }}
+      uses: csas-ops/inet-ghb-actions/.github/workflows/get-platform_configServer-label.yml@master
+      #uses: ./.github/workflows/get-platform_configServer-label.yml
+      with:
+        manifest: ${{ matrix.manifest }}
+
+    prepareMatrix:
+      #github.ref_name - use in github
+      #github.ref - use on act, because github.ref_name is not available for act
+      if: (github.ref_name == 'env/BRANCH_NAME_NAHRAD' || github.ref_name == 'env/prod') || ( github.actor == 'nektos/act' && (github.ref == 'env/BRANCH_NAME_NAHRAD' || github.ref == 'env/prod'))
+      name: Prepare Matrix - ${{ matrix.manifest }}
+      runs-on:
+        - csas-linux
+      needs: [findingModifiedMaifest, getPlatformAndConfigServerLabel]
+      strategy:
+        matrix:
+          manifest: ${{ fromJson(needs.findingModifiedMaifest.outputs.data) }}
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v3
+          with:
+            fetch-depth: 0
+
+        - name: New version
+          id: new_version
+          run: |
+            # Extract the value of the targetRevision field from manifest file and send it in output.
+            version=$(yq '.spec.source.targetRevision' ${{ matrix.manifest }})
+            echo "NEW_VERSION=$version" >> "$GITHUB_OUTPUT"
+
+        - name: Branch for matrix
+          id: environment_list
+          env:
+            PLATFORM: ${{ needs.getPlatformAndConfigServerLabel.outputs.PLATFORM }}
+            APP_NAME: ${{ needs.getPlatformAndConfigServerLabel.outputs.APP_NAME }}
+            LABEL_NAME: ${{ needs.getPlatformAndConfigServerLabel.outputs.LABEL_NAME }}
+          run: |
+            git checkout master
+            
+            #Parse the YAML file and extract the value of the x-setVersionOnBranches field. Output the result is in JSON format.
+            yq eval '.["x-setVersionOnBranches"]' -o=json configServer/${{ env.LABEL_NAME }}/${{ env.APP_NAME }}/application.yml
+            yq_result=$(yq eval '.["x-setVersionOnBranches"]' -o=json configServer/${{ env.LABEL_NAME }}/${{ env.APP_NAME }}/application.yml)
+
+            #Filter
+            #If the current branch is env/prod, then the value of the x-setVersionOnBranches field is filtered by the edu value.
+            #If the current branch is env/dev, then the value of the x-setVersionOnBranches skip the values for dev and edu environments (map(select(test("dev|edu") | not))).
+            if [[ ${{ contains(github.ref_name, 'env/prod') }} == "true" ]]; then
+              branch_name=$(echo "$yq_result" | jq -cr 'map(select(test("edu"))) | @json')
+              if [[ $(echo "$branch_name" | wc -l) -eq 0 ]]; then
+                echo "We do not want to deploy to the edu environment."
+              fi
+            elif [[ ${{ contains(github.ref_name, 'BRANCH_NAME_NAHRAD') }}  == "true" ]]; then
+              branch_name=$(echo "$yq_result" | jq -cr 'map(select(test("BRANCH_NAME_NAHRAD|edu") | not)) | @json')
+              if [[ $(echo "$branch_name" | wc -l) -eq 0 ]]; then
+                echo "We do not want to deploy automaticaly anywhere."
+              fi
+            fi
+            echo "BRANCH_NAME=$branch_name"
+
+            #Remove string env/
+            # shellcheck disable=SC2001
+            branch_name=$(echo "${branch_name}" | sed "s|env/||g")
+            echo "BRANCH_NAME=$branch_name" >> "$GITHUB_OUTPUT"
+
+        - name: Trigger Workflow
+          if: ${{ steps.environment_list.outputs.BRANCH_NAME != '[]' }}
+          run: |
+            output_file="output.txt"
+            branch_name=$(echo "${{env.BRANCH_NAME}}" | tr -d "\"")
+
+            curl -o "${output_file}" -X POST -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{secrets.TECHUSERPAT}}" \
+              https://api.github.com/repos/${{ env.REPO_NAME }}/actions/workflows/${{ env.WORKFLOW_NAME }}/dispatches \
+              -d '{"ref":"refs/heads/master","inputs":{"appName":"${{ env.APP_NAME }}","newVersion":"${{ env.VERSION }}","envName":"'"${branch_name}"'","labelName":"${{ env.LABEL_NAME }}"}}' -s
+            if [[ $(jq '.message' "${output_file}" | wc -l) -gt 0 ]]; then
+              echo "::error::Error message in curl output - $(jq '.message' ${output_file})"
+              exit 1
+            fi
+          env:
+            WORKFLOW_NAME: "setVersion.yml"
+            BRANCH_NAME: ${{ steps.environment_list.outputs.BRANCH_NAME }}
+            APP_NAME: ${{ needs.getPlatformAndConfigServerLabel.outputs.APP_NAME }}
+            LABEL_NAME: ${{ needs.getPlatformAndConfigServerLabel.outputs.LABEL_NAME }}
+            VERSION: ${{ steps.new_version.outputs.NEW_VERSION }}
+            REPO_NAME: ${{ github.repository }}

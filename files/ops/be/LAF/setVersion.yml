@@ -1,0 +1,138 @@
+name: Update Application Version
+run-name: 'Update version ${{ inputs.newVersion }}, app: ${{ inputs.appName }}, branch: ${{ inputs.envName }}, label: ${{ inputs.labelName }}'
+
+# The workflow is manually triggered (workflow_dispatch) and accepts four inputs: newVersion, appName, labelName, and envName.
+on:
+  workflow_dispatch:
+    inputs:
+      newVersion:
+        description: 'New version'
+        default: 1.1.10
+        required: true
+      appName:
+        description: 'Application name'
+        required: true
+        default: scenarios
+      labelName:
+        description: 'Label name'
+        default: laf-services
+      envName:
+        description: 'Environment name'
+        required: true
+        default: deva
+jobs:
+  update_version:
+    runs-on: csas-linux
+    steps:
+      # Checks out the repository using the checkout action.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update application version
+        env:
+          newVersion: "${{ github.event.inputs.newVersion }}"
+          appName: "${{ github.event.inputs.appName }}"
+          labelName: "${{ github.event.inputs.labelName }}"
+          envName: "${{ github.event.inputs.envName }}"
+          listOfFiles: "/tmp/file_list.txt"
+        run: |
+          # This command finds all lines in the repository that match the pattern for a targetRevision line in a YAML file.
+          # It then filters these lines to include only those in files that match the pattern for an application configuration file.
+          # The output (a list of matching lines, each prefixed with the filename) is saved to a temporary file.
+          grep -wE "^(\t{2}| {4})targetRevision: \S*" -r | grep -E "application(NAHRAD_ENV)?\.yml" > "${listOfFiles}"
+
+          # This command checks if there are any configuration files for the specified application.
+          # If not, it logs an error and exits with a non-zero status code.
+          if [[ $(grep -rEw "^(\t{1}| {2})name: ${appName}" | wc -l) -eq 0 ]]; then
+            echo "::error::The config files are not for application ${appName}"
+            exit 55
+          fi
+
+          # This function is used to find the filename of the configuration file that contains a specified line.
+          finalName() {
+            what="${1}"
+            where="${2}"
+            file_name=$(grep "${what}" "${where}" | cut -d ":" -f 1)
+            echo "::debug::The file is ${file_name}"
+          }
+
+
+          branch_name="${{ inputs.envName }}"
+          echo "newVersion=$newVersion appName=$appName envName=$envName numberApplicationFiles=$numberApplicationFiles numberLabelsFiles=$numberLabelsFiles numberGlobalFiles=$numberGlobalFiles"
+
+          # Remove square bracket,whitespace
+          # shellcheck disable=SC2046
+          # The branch_name variable is cleaned of square brackets and whitespace, then split into an array of branches.
+          IFS=',' read -ra branches <<< $(echo "${branch_name}" | tr -d "[] ")
+
+          # For each branch in the array of branches:
+          for branch in "${branches[@]}"
+          do
+            
+            # Count the number of configuration files for the application, the label, and the environment.
+            numberApplicationFiles=$(grep -c "/${appName}/" "${listOfFiles}" || true)
+            numberLabelsFiles=$(grep -c "/${labelName}/" "${listOfFiles}" || true)
+            numberGlobalFiles=$(grep -c "application-${branch}.yml" "${listOfFiles}" || true)
+            echo "newVersion=$newVersion appName=$appName envName=$envName numberApplicationFiles=$numberApplicationFiles numberLabelsFiles=$numberLabelsFiles numberGlobalFiles=$numberGlobalFiles"
+
+            # Depending on the counts, determine the correct configuration file to update.
+            if [[ ${numberApplicationFiles} -ge 1 && $(grep -c "/${appName}/application-${branch}.yml" "${listOfFiles}") -eq 1 ]]; then
+              # The file for setting the application version is located in the application directory and has the same environment extension
+              finalName "/${appName}/application-${branch}.yml" "${listOfFiles}"
+            elif [[ ${numberApplicationFiles} -ge 1 && $(grep -c "${labelName}/${appName}/application-${branch}.yml" "${listOfFiles}") -eq 1 ]]; then
+              finalName "${labelName}/${appName}/application-${branch}.yml" "${listOfFiles}"
+            elif [[ ${numberApplicationFiles} -ge 1 ]]; then
+              # The file for setting the application version is located in the application directory but does not have an environment extension
+              finalName "/${appName}/application.yml" "${listOfFiles}"
+            elif [[ ${numberLabelsFiles} -ge 1 && $(grep -c "/${labelName}/application-${branch}.yml" "${listOfFiles}") -eq 1 ]]; then
+              # The file for setting the application version is located in the LABEL directory and has the environment extension
+              finalName "/${labelName}/application-${branch}.yml" "${listOfFiles}"
+            elif [[ ${numberLabelsFiles} -ge 1 ]]; then
+              finalName "/${labelName}/application.yml" "${listOfFiles}"
+            elif [[ ${numberGlobalFiles} -eq 1 ]]; then
+              # The file for setting the application version is located in the LABEL directory and has the environment extension
+              finalName "application-${branch}.yml" "${listOfFiles}"
+            elif [[ ${numberGlobalFiles} -eq 0 ]]; then
+              # The file for setting the application version is located in the LABEL directory but does not have an environment extension
+              finalName "application.yml" "${listOfFiles}"
+            else
+              echo "::error::Unexpected error."
+            fi
+
+            # Once the correct file has been identified, update the targetRevision value in that file to the newVersion input.
+            echo -e "\nfile_name=${file_name}\n\n"
+            sed -i -E "s/(targetRevision:)[[:space:]]*([-0-9.a-zA-Z{}]+|[[:alnum:]_]+)/\1 ${newVersion}/" "${file_name}"
+          done
+
+          git status --porcelain -uall
+
+      # Creates a pull request with the changes made in the previous step using the create-pull-request action.
+      - name: Create Pull Request
+        id: cpr
+        uses: peter-evans/create-pull-request@v5
+        with:
+          title: "New version ${{inputs.newVersion}} of application ${{inputs.appName}} on ${{inputs.envName}}"
+          commit-message: "New version ${{inputs.newVersion}} of ${{inputs.appName}} on ${{inputs.envName}}"
+          branch: feat/${{inputs.appName}}
+          labels: ${{github.ref_name}}, ${{inputs.appName}},${{inputs.envName}},${{inputs.labelName}}
+
+      # Waits for 5 seconds. This might be to give GitHub some time to process the creation of the pull request.
+      - name: sleep
+        run: |
+          sleep 5
+
+      # Approves the pull request created in the step with id CPR, if it was indeed created (i.e., if it wasn't already open).
+      - name: Approve PR
+        if: steps.cpr.outputs.pull-request-operation == 'created'
+        run: |
+          gh pr review --approve ${{ steps.cpr.outputs.pull-request-number }}
+        env:
+          GH_TOKEN: ${{ secrets.TECHUSERPAT }}
+
+      # The final step enables auto-merge for the pull request, meaning it will be automatically merged once all required status checks pass.
+      - name: Automerge enabled
+        if: steps.cpr.outputs.pull-request-operation == 'created'
+        run: |
+          gh pr merge --auto --rebase ${{ steps.cpr.outputs.pull-request-number }}
+        env:
+          GH_TOKEN: ${{ secrets.TECHUSERPAT }}

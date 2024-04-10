@@ -1,0 +1,167 @@
+name: LAF WLS Application deployment
+run-name: LAF WLS Application deployment ${{ inputs.manifest-file }} on ${{ github.ref_name }}
+
+on:
+  push:
+    branches:
+      - 'env/*'
+    paths:
+      - '**/laf*/**/manifest-*.ya?ml'
+
+concurrency: ci-${{ github.ref }}
+
+jobs:
+  deploy:
+    secrets: inherit
+    uses: ./.github/workflows/laf_wls_deploy_changed_manifest.yml
+
+  cho:
+    needs:
+      - deploy
+    uses: csas-actions/devops-platform-cd-common/.github/workflows/close-change-order.yml@master
+    with:
+      result: ${{ needs.deploy.result }}
+
+  finding-modified-maifest:
+    outputs:
+      data: ${{ steps.manifest.outputs.manifests }}
+    runs-on:
+      - csas-linux
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find changed manifest files
+        id: manifest
+        run: |
+          # shellcheck disable=SC2016
+          JSON=$(git diff --diff-filter=d --name-only HEAD^ | grep "manifest-.*\.ya\?ml$" | xargs jq -c -n '$ARGS.positional' --args --)
+          echo "::debug::modified manifest files JSON: $JSON"
+          echo "manifests=$JSON" >> "$GITHUB_OUTPUT"
+
+  prepareMatrix:
+    if: github.ref_name == 'env/deva' || github.base_ref == 'env/deva'
+    name: ${{ matrix.manifest }}
+    runs-on:
+      - csas-linux
+    needs: [deploy, finding-modified-maifest]
+    strategy:
+      matrix:
+        manifest: ${{ fromJson(needs.finding-modified-maifest.outputs.data) }}
+    outputs:
+      BRANCH_NAME_MATRIX: ${{ steps.environment_list.outputs.BRANCH_NAME }}
+      APP_NAME: ${{ steps.app_name.outputs.APP_NAME }}
+      LABEL_NAME: ${{ steps.label_name.outputs.LABEL_NAME }}
+      VERSION: ${{ steps.new_version.outputs.NEW_VERSION }}
+    steps:
+      - name: Dump GitHub context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Application name
+        id: app_name
+        run: |
+          app_name=$(yq '.metadata.name' ${{ matrix.manifest}})
+          echo "APP_NAME=$app_name" >> "$GITHUB_OUTPUT"
+
+      - name: New version
+        id: new_version
+        run: |
+          version=$(yq '.spec.source.targetRevision' ${{ matrix.manifest }})
+          echo "NEW_VERSION=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Platform
+        id: platform
+        run: |
+          get_platform() {
+            # If a 'x-platformDirs' attribute is defined, use its value as platform folder
+            readarray -t PLATFORMS < <(yq '.x-platformDirs[]' $1)
+            [ "${#PLATFORMS[@]}" -gt 0 ] && return
+
+            API_VERSION=$(yq '.apiVersion' $1)
+            KIND=$(yq '.kind' $1)
+
+            case "${API_VERSION%/*},${KIND}" in
+            "argoproj.io,Application")
+              PLATFORMS=("aks")
+              ;;
+            "ops.csas.cz,Application")
+              PLATFORMS=("ocp4s-${API_VERSION#*/}/${KIND}" "ocp4s")
+              # We don't want the standardized platform folder path here, leaving early
+              return
+              ;;
+            "laf.csas.cz,JavaApplication" | "laf.csas.cz,JBossApplication" | "laf.csas.cz,WeblogicApplication")
+              PLATFORMS=("laf")
+              ;;
+            *)
+              PLATFORMS=("unknown")
+              ;;
+            esac
+            echo "${PLATFORMS}"
+          }
+
+          platform=$(get_platform ${{ matrix.manifest }})
+          echo "PLATFORM=$platform"
+          echo "PLATFORM=$platform" >> "$GITHUB_OUTPUT"
+
+      - name: Label name
+        id: label_name
+        env:
+          PLATFORM: ${{ steps.platform.outputs.PLATFORM }}
+        run: |
+          platform=${{ env.PLATFORM }}
+
+          case ${platform} in
+            laf)
+              laf_domain_name=$(yq '.spec.source.*.values.laf.application' ${{ matrix.manifest }})
+              label_dir_name="${platform}-${laf_domain_name}";;
+            *)
+              label_dir_name="${platform}";;
+          esac
+          echo "LABEL_NAME=$label_dir_name"
+          echo "LABEL_NAME=$label_dir_name" >> "$GITHUB_OUTPUT"
+
+      - name: Branch for matrix
+        id: environment_list
+        env:
+          PLATFORM: ${{ steps.platform.outputs.PLATFORM }}
+          APP_NAME: ${{ steps.app_name.outputs.APP_NAME }}
+          LABEL_NAME: ${{ steps.label_name.outputs.LABEL_NAME }}
+        run: |
+          git checkout master
+          yq eval '.["x-setVersionOnBranches"]' -o=json configServer/${{ env.LABEL_NAME }}/${{ env.APP_NAME }}/application.yml | grep -v "env/deva"
+          branch_name=$(yq eval '.["x-setVersionOnBranches"]' -o=json configServer/${{ env.LABEL_NAME }}/${{ env.APP_NAME }}/application.yml | \
+                        grep -v "deva" | jq -cr '@json')
+
+          #Remove string env/
+          # shellcheck disable=SC2001
+          branch_name=$(echo "${branch_name}" | sed "s|env/||g")
+          echo "BRANCH_NAME=$branch_name" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Workflow
+        run: |
+          output_file="output.txt"
+          branch_name=$(echo "${{env.BRANCH_NAME}}" | tr -d "\"")
+          curl -o "${output_file}" -X POST -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{secrets.TECHUSERPAT}}" \
+            https://api.github.com/repos/${{ env.REPO_NAME }}/actions/workflows/${{ env.WORKFLOW_NAME }}/dispatches \
+            -d '{"ref":"refs/heads/master","inputs":{"appName":"${{ env.APP_NAME }}","newVersion":"${{ env.VERSION }}","envName":"'"${branch_name}"'","labelName":"${{ env.LABEL_NAME }}"}}' -s
+          if [[ $(jq '.message' "${output_file}" | wc -l) -gt 0 ]]; then
+            echo "::error::Error message in curl output - $(jq '.message' ${output_file})"
+            exit 1
+          fi
+        env:
+          WORKFLOW_NAME: "setVersion.yml"
+          BRANCH_NAME: ${{ steps.environment_list.outputs.BRANCH_NAME }}
+          APP_NAME: ${{ steps.app_name.outputs.APP_NAME }}
+          LABEL_NAME: ${{ steps.label_name.outputs.LABEL_NAME }}
+          VERSION: ${{ steps.new_version.outputs.NEW_VERSION }}
+          REPO_NAME: ${{ github.repository }}

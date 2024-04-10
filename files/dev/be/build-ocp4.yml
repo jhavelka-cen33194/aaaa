@@ -1,0 +1,77 @@
+name: Build application
+
+on:
+  workflow_dispatch:
+  push:
+#    branches: [ "master" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  callBuilds:
+    uses: csas-dev/inet-ghb-actions/.github/workflows/ci_java_build-ocp4.yml@master
+    permissions:
+      contents: read
+    with:
+      CHART_REPOSITORY: CHART_REPO_NAHRAD
+      IMAGE_REPOSITORY: IMAGE_REPO_NAHRAD
+      HELM_CHARTS: HELM_CHARTS_NAHRAD
+      JAVA_VERSION: JAVA_VERSION_NAHRAD
+      BUILD_AUTOMATION_TOOL: GRADLE_MAVEN_NAHRAD
+    secrets:
+      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  SecurityScan-TrivyScan:
+    uses: csas-dev/inet-ghb-actions/.github/workflows/java_trivy_scan.yml@master
+    needs: callBuilds
+    permissions:
+      contents: read
+    with:
+      DOCKER_IMAGE: ${{ needs.callBuilds.outputs.DOCKER_IMAGE }}
+      IMAGE_SHORT_NAME: ${{ needs.callBuilds.outputs.IMAGE_SHORT_NAME }}
+    secrets:
+      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+
+  SetVersionOnOPS:
+    if: >
+      (
+        startsWith(github.ref, 'refs/tags/') &&
+        github.event_name == 'push'
+      )
+    needs:
+      - callBuilds
+      - SecurityScan-TrivyScan
+    runs-on: csas-linux
+    steps:
+      - name: Build version
+        id: version
+        uses: csas-actions/build-version@v1
+
+      - name: Trigger Workflow
+        run: |
+
+          version=${{ env.VERSION }}
+
+          output_file="output.txt"
+          branch_name=$(echo "${{env.BRANCH_NAME}}" | sed "s|env/||g" | tr -d "\"")
+          echo "version=${version#v} GITHUB_REPOSITORY=${GITHUB_REPOSITORY#*/*-} branch_name=${branch_name}"
+
+          curl -o "${output_file}" -X POST -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{secrets.TECHUSERPAT}}" \
+            https://api.github.com/repos/csas-ops/OPS_REPO_NAHRAD/actions/workflows/${{ env.WORKFLOW_NAME }}/dispatches \
+            -d '{"ref":"refs/heads/master","inputs":{"appName":"${{ env.APP_NAME }}","newVersion":"'"${version#v}"'","envName":"'"${branch_name}"'","labelName":"${{ env.LABEL_NAME }}"}}' -s
+          cat ${output_file}
+          if [[ $(jq '.message' "${output_file}" | wc -l) -gt 0 ]]; then
+            echo "::error::Error message in curl output - $(jq '.message' ${output_file})"
+            exit 1
+          fi
+        env:
+          WORKFLOW_NAME: "setVersion.yml"
+          BRANCH_NAME: "BRANCH_NAME_NAHRAD"
+          LABEL_NAME: "ocp4s"
+          VERSION: ${{ steps.version.outputs.version }}
+          APP_NAME: "APP_NAME_NAHRAD"

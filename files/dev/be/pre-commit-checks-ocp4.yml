@@ -1,0 +1,12 @@
+name: 'pre-commit checks'
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  pre-commit:
+    uses: csas-dev/inet-ghb-actions/.github/workflows/ci-pre-commit-checks-ocp4.yml@master
+    permissions:
+      contents: read
+      id-token: write

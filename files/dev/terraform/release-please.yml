@@ -1,0 +1,5 @@
+# https://github.com/googleapis/repo-automation-bots/tree/main/packages/release-please#configuration
+handleGHRelease: true
+releaseType: terraform-module
+extraFiles:
+  - examples/main.tf

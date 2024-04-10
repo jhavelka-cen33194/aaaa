@@ -1,0 +1,5 @@
+# https://github.com/csas-dev/cicd-semantic-pull-requests#readme
+enabled: true
+titleAndCommits: true
+allowMergeCommits: true
+allowRevertCommits: true

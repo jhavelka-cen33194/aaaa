@@ -1,0 +1,89 @@
+name: Build application
+
+on:
+  workflow_dispatch:
+  push:
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  callBuilds:
+    uses: csas-dev/inet-ghb-actions/.github/workflows/ci_java_weblogic_build.yml@master
+    permissions:
+      contents: read
+    with:
+      JAVA_VERSION: JAVA_VERSION_NAHRAD
+    secrets:
+      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  SecurityScan-TrivyScan:
+    runs-on: csas-linux
+    if: "${{ ! contains(github.event.pull_request.title, '-SNAPSHOT') }}"
+    steps:
+      - run: echo -e "\e[0;31m Musis pri nalzeu skoncit s chybou \e[0m"
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Filesystem scan
+        uses: csas-actions/trivy-action@v1
+        with:
+          scan-type: filesystem
+          scan-ref: .
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          exit-code: 0
+
+      - name: Misconfiguration scan by Trivy
+        uses: csas-actions/trivy-action@v1
+        if: always()
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: 0
+          # Output to the job summary instead of logs
+          output: ${{ github.step_summary }}
+          # NOTE this currently produces some garbage, waiting for https://github.com/aquasecurity/trivy/issues/3201
+          template: '@/contrib/html.tpl'
+
+  SetVersionOnOPS:
+    if: >
+      (
+        startsWith(github.ref, 'refs/tags/') &&
+        github.event_name == 'push'
+      )
+    needs:
+      - callBuilds
+    runs-on: csas-linux
+    steps:
+      - name: Build version
+        id: version
+        uses: csas-actions/build-version@v1
+
+      - name: Trigger Workflow
+        run: |
+
+          version=${{ env.VERSION }}
+
+          output_file="output.txt"
+          branch_name=$(echo "${{env.BRANCH_NAME}}" | sed "s|env/||g" | tr -d "\"")
+          echo "version=${version#v} GITHUB_REPOSITORY=${GITHUB_REPOSITORY#*/*-} branch_name=${branch_name}"
+
+          curl -o "${output_file}" -X POST -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{secrets.TECHUSERPAT}}" \
+            https://api.github.com/repos/csas-ops/OPS_REPO_NAHRAD/actions/workflows/${{ env.WORKFLOW_NAME }}/dispatches \
+            -d '{"ref":"refs/heads/master","inputs":{"appName":"${{ env.APP_NAME }}","newVersion":"'"${version#v}"'","envName":"'"${branch_name}"'","labelName":"${{ env.LABEL_NAME }}"}}' -s
+          cat ${output_file}
+          if [[ $(jq '.message' "${output_file}" | wc -l) -gt 0 ]]; then
+            echo "::error::Error message in curl output - $(jq '.message' ${output_file})"
+            exit 1
+          fi
+        env:
+          WORKFLOW_NAME: "setVersion.yml"
+          BRANCH_NAME: "BRANCH_NAME_NAHRAD"
+          LABEL_NAME: "LABEL_NAME_NAHRAD"
+          VERSION: ${{ steps.version.outputs.version }}
+          APP_NAME: "APP_NAME_NAHRAD"

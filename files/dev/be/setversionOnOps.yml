@@ -1,0 +1,28 @@
+name: Deploy to Deva
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  SetVersionOnOPS:
+    if: >
+      ( contains(github.event_name, 'release') && contains(github.event.action, 'published') ) &&
+      github.actor == 'csas-dev-release-please[bot]'
+    runs-on: csas-linux
+    steps:
+      - name: Set version
+        #if: (contains(github.actor, 'csas-dev-release-please[bot]') && ! contains(github.event.pull_request.title, '-SNAPSHOT') )
+        id: version
+        run: |
+          echo "NEXT_VERSION=${{github.event.release.name}} GITHUB_REPOSITORY=${GITHUB_REPOSITORY}"
+          NEXT_VERSION=${{github.event.release.name}}
+          echo ${NEXT_VERSION#v}
+          # release-please vytvori Release dle vzoru vX.X.X
+          #   musime odebrat v ze jmana, protoze artefact v Artifactory ho ve jmene nema
+          #     ==> ${NEXT_VERSION#v}
+          curl -X POST -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{secrets.TECHUSERPAT}}" \
+            https://api.github.com/repos/csas-ops/OPS_REPO_NAHRAD/actions/workflows/set_version.yml/dispatches \
+            -d '{"ref":"refs/heads/master","inputs":{"serviceName":"'"${GITHUB_REPOSITORY#*/}"'","nextVersion":"'"${NEXT_VERSION#v}"'","branch":"env/deva"}}' -s

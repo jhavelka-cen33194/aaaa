@@ -1,0 +1,91 @@
+name: Deploy FE - Beta
+run-name: Deploy event ${{ github.event_name }} to ${{ github.environment || github.ref_name }} ${{ inputs.artifact_version && format('{0} {1}', '- ver:', inputs.artifact_version) || '' }} by @${{ github.actor }}
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_version:
+        description: 'Version to deploy'
+        required: false
+      environment:
+        description: 'Env to deploy'
+        required: true
+        type: choice
+        options:
+          - 'deva'
+          - 'int'
+          - 'prs'
+          - 'prep' # Do not use 'pred' name, AzureCDN doesn't know it
+  # Run only when deploy.version file is changed
+  push:
+    branches:
+      - 'env/*'
+    paths:
+      - 'deploy.version'
+jobs:
+  prepare:
+    runs-on: 'csas-linux-beta'
+    outputs:
+      DEPLOY_ENV: ${{ steps.envir-output.outputs.DEPLOY_ENV }}
+      ARTIFACT_VERSION: ${{ steps.envir-output.outputs.ARTIFACT_VERSION }}
+    steps:
+    # Checkout
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - id: prepare-push
+      name: Prepare env on push
+      # Extract environment from branch name
+      if: ${{ github.event_name == 'push' }}
+      run: |
+        branch_env=$(echo "${{ github.ref_name }}" | sed -r "s#.*\/([a-z]+)#\1#")
+        [ ! -f deploy.version ] && echo "::error::File deploy.version doesn't exist" && exit 1
+        deploy_version=$(grep -Eo "[0-9]+\.[0-9]+\.[0-9]+" deploy.version)
+        [[ ! "${deploy_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && echo "::error::Error while checking desired deploy version" && exit 1
+        echo "::notice::Workflow invoked by PUSH event"
+        echo "ARTIFACT_VERSION=${deploy_version}" >> "$GITHUB_ENV"
+        echo "DEPLOY_ENV=${branch_env}" >> "$GITHUB_ENV"
+    - id: prepare-dispatch
+      name: Prepare env on workflow_dispatch
+      # Extract environment from input value
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      run: |
+        echo "::notice::Workflow invoked by user"
+        echo "DEPLOY_ENV=${{ github.event.inputs.environment }}" >> "$GITHUB_ENV"
+        echo "ARTIFACT_VERSION=${{ github.event.inputs.artifact_version }}" >> "$GITHUB_ENV"
+
+    - id: envir-output
+      name: Output envir variable
+      run: |
+        echo "DEPLOY_ENV=${{ env.DEPLOY_ENV }}" >> "$GITHUB_OUTPUT"
+        echo "ARTIFACT_VERSION=${{ env.ARTIFACT_VERSION }}" >> "$GITHUB_OUTPUT"
+        echo "::notice::ARTIFACT_VERSION=${{ env.ARTIFACT_VERSION }}"
+        echo "::notice::DEPLOY_ENV=${{ env.DEPLOY_ENV }}"
+  callDeploy:
+    needs: prepare
+    uses: csas-ops/inet-ghb-actions/.github/workflows/deploy-fe-common.yml@master
+    with:
+      ARTIFACTORY_URL: https://artifactory.csin.cz
+      # Static content requires generic repository
+      REPOSITORY_NAME: ARTIFACTORY_REPO_NAME_NAHRAD
+      # Name of artifact for deploy
+      ARTIFACT_NAME: REPO_NAHRAD
+      # Artifact version to deploy
+      ARTIFACT_VERSION: ${{needs.prepare.outputs.ARTIFACT_VERSION}}
+      # Azure storage name
+      AZURE_ACCOUNT: AZURE_ACCOUNT_NAHRAD
+      # Azure application url
+      AZURE_BLOB: AZURE_BLOB_NAHRAD
+      # Azure CDN container // nemeni se - je automaticky doplneno, v nasem pripade na cdncsascz
+      AZURE_CONTAINER: $web
+      # Environment to deploy
+      ENVIRONMENT: ${{needs.prepare.outputs.DEPLOY_ENV}}
+      # first space in URL (CDM FE will be https://deva-cdn.csast.csas.cz/inet/cdm - URL_APPLICATION_DIR=inet)
+      URL_APPLICATION_DIR: URL_APP_DIR_NAHRAD
+      USE_BETA_RUNNER: true
+    secrets:
+      # JFrog access token for communication with artifactory
+      ARTIFACTORY_TOKEN: ${{secrets.ARTIFACTORY_ACCESS_TOKEN}}
+      # Azure access token from evironment secrets
+      AZURE_SAS_TOKEN: ${{secrets.AZURE_SAS_TOKEN}}
+    permissions:
+      contents: read

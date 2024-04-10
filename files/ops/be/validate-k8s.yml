@@ -1,0 +1,21 @@
+name: Validate ArgoCD deployment
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  deploy-k8s:
+    name: Checking deployment status. . .
+    secrets: inherit
+    uses: csas-actions/devops-platform-cd-common/.github/workflows/argocd-validate-deploy.yml@master
+
+  # If only one of the technologies deployment fail, the Change order should be unsuccessful.
+
+  cho:
+    if: failure()
+    needs:
+    - deploy-k8s
+    uses: csas-actions/devops-platform-cd-common/.github/workflows/close-change-order.yml@master
+    with:
+      result: ${{ needs.deploy-k8s.result }}

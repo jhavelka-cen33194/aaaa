@@ -1,0 +1,33 @@
+name: Clean Service now
+
+on:
+  workflow_dispatch:
+  schedule:
+    #- cron: '30 11 * * *' # Run this workflow every day at midnight
+    - cron: 'CRON_EXPRESION_NAHRAD' # Run this workflow every day at midnight
+
+jobs:
+  check-merged-pr:
+    outputs:
+      data: ${{ steps.pr.outputs.data }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        
+      - name: Clean PRs
+        run: |
+          echo "Get PRs"
+          gh pr list --json number,baseRefName,comments,title -L 2000 -s merged > tmp.json
+          cat tmp.json
+          echo "Filter PRs"
+          
+          jq -r '.[] | select(.baseRefName | contains("env/") and (contains("prod") | not)) | select((.comments | length == 0) or (.comments | map(select(.author.login == "github-actions")) | all(.body | contains("/success") or contains("/failure") | not))) | .number' tmp.json > pr.txt
+          
+          cat pr.txt
+          
+          while read -r PR_NUMBER; do
+            echo "Comment PR $PR_NUMBER"
+            gh pr comment $PR_NUMBER --body "/success"
+          done < pr.txt
+        env:
+          GH_TOKEN: ${{ github.token }}

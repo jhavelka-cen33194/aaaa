@@ -1,0 +1,191 @@
+name: Deploy application
+
+on:
+  push:
+    branches:
+      - 'env/*'
+    paths:
+      - '**/manifest-*.ya?ml'
+
+concurrency: ci-${{ github.ref }}
+
+jobs:
+    deploy:
+      secrets: inherit
+      uses: ./.github/workflows/deploy_changed_manifest.yml
+
+    cho:
+      needs:
+        - deploy
+      uses: csas-actions/devops-platform-cd-common/.github/workflows/close-change-order.yml@v1
+      with:
+        result: ${{ needs.deploy.result }}
+
+    prepareMatrix:
+      #github.ref_name - use in github
+      #github.ref - use on act, because github.ref_name is not available for act
+      if: (contains(github.ref_name, 'env/dev') || github.ref_name == 'env/prod') || ( github.actor == 'nektos/act' && (contains(github.ref_name, 'env/dev') || github.ref == 'env/prod'))
+      name: Prepare Matrix - ${{ matrix.manifest }}
+      runs-on:
+        - csas-linux
+      needs: 
+        - deploy
+      strategy:
+        matrix:
+          manifest: ${{ fromJson(needs.deploy.outputs.manifestData) }}
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
+
+        - name: Application name
+          id: app_name
+          run: |
+            # Extract the value of the name field from the metadata section and send it in output.
+            app_name=$(yq '.metadata.name' ${{ matrix.manifest }})
+            echo "APP_NAME=$app_name"
+            echo "APP_NAME=$app_name" >> "$GITHUB_OUTPUT"
+
+        - name: Platform
+          id: platform
+          run: |
+            echo manifest=${{ matrix.manifest }}
+            get_platform() {
+              # shellcheck disable=SC2086
+              manifest=$1
+              # If a 'x-platformDirs' attribute is defined, use its value as platform folder
+              
+              readarray -t PLATFORMS < <(yq '.x-platformDirs[]' "${manifest}")
+              [ "${#PLATFORMS[@]}" -gt 0 ] && return
+
+              # If 'x-platformDirs' is not defined, determine the platform name based on the 'apiVersion' and 'kind' attributes.
+              API_VERSION=$(yq '.apiVersion' "${manifest}")
+              KIND=$(yq '.kind' "${manifest}")
+
+              # Match the 'apiVersion' and 'kind' to known platform names.
+              case "${API_VERSION%/*},${KIND}" in
+                "argoproj.io,Application")
+                  PLATFORMS=("aks")
+                  ;;
+                "db.csas.cz,Database")
+                  PLATFORMS=("db")
+                  ;;
+                "ops.csas.cz,Application")
+                  PLATFORMS=("ocp4s")
+                  ;;
+                "laf.csas.cz,JavaApplication" | "laf.csas.cz,JBossApplication" | "laf.csas.cz,WeblogicApplication")
+                  PLATFORMS=("laf")
+                  ;;
+                "cdn.csas.cz,StaticWebApplication" | "cdn.csas.cz,StorageAccount")
+                  PLATFORMS=("cdn-sa")
+                  ;;
+                "general.csas.cz,General")
+                  PLATFORMS=("general")
+                  ;;
+                *)
+                  PLATFORMS=("unknown")
+                  ;;
+              esac
+              echo "${PLATFORMS[@]}"
+
+            }
+
+            # Call the 'get_platform' function with the YAML file as an argument.
+            platform=$(get_platform ${{ matrix.manifest }})
+            echo "PLATFORM=$platform"
+            echo "PLATFORM=$platform" >> "$GITHUB_OUTPUT"
+
+        - name: Label name
+          id: label_name
+          env:
+            # Set the PLATFORM environment variable to the value of the 'platform' step output
+            PLATFORM: ${{ steps.platform.outputs.PLATFORM }}
+          run: |
+            platform=${{ env.PLATFORM }}
+    
+            case ${platform} in
+              laf)
+                # If the 'platform' value is 'laf', get the 'laf' domain name from the YAML file and set the label name to 'platform-laf_domain_name'
+                laf_domain_name=$(yq '.spec.source.*.values.laf.application' ${{ matrix.manifest }})
+                label_dir_name="${platform}-${laf_domain_name}";;
+              *)
+                # If the 'platform' value is not 'laf', set the label name to 'platform'
+                label_dir_name="${platform}";;
+            esac
+
+            # Add the label name to the GitHub output
+            echo "LABEL_NAME=$label_dir_name"
+            echo "LABEL_NAME=$label_dir_name" >> "$GITHUB_OUTPUT"
+
+        - name: New version
+          id: new_version
+          run: |
+            # Extract the value of the targetRevision field from manifest file and send it in output.
+            version=$(yq '.spec.source.targetRevision' ${{ matrix.manifest }})
+            echo "NEW_VERSION=$version" >> "$GITHUB_OUTPUT"
+
+        - name: Branch for matrix
+          id: environment_list
+          env:
+            PLATFORM: ${{ steps.platform.outputs.PLATFORM }}
+            APP_NAME: ${{ steps.app_name.outputs.APP_NAME }}
+            LABEL_NAME: ${{ steps.label_name.outputs.LABEL_NAME }}
+          run: |
+            git checkout master
+            
+            #Parse the YAML file and extract the value of the x-setVersionOnBranches field. Output the result is in JSON format.
+            yq eval '.["x-setVersionOnBranches"]' -o=json configServer/${{ env.LABEL_NAME }}/${{ env.APP_NAME }}/application.yml
+            yq_result=$(yq eval '.["x-setVersionOnBranches"]' -o=json configServer/${{ env.LABEL_NAME }}/${{ env.APP_NAME }}/application.yml)
+            
+            #if $yq_result == null close the rest steps
+            if [[ $yq_result == "null" ]]; then
+              echo "We do not want to deploy automaticaly anywhere."
+              echo "BRANCH_NAME=[]" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            #Filter
+            #If the current branch is env/prod, then the value of the x-setVersionOnBranches field is filtered by the edu value.
+            #If the current branch is env/dev, then the value of the x-setVersionOnBranches skip the values for dev and edu environments (map(select(test("dev|edu") | not))).
+            if [[ ${{ contains(github.ref_name, 'env/prod') }} == "true" ]]; then
+              branch_name=$(echo "$yq_result" | jq -cr 'map(select(test("edu"))) | @json')
+              if [[ $(echo "$branch_name" | wc -l) -eq 0 ]]; then
+                echo "We do not want to deploy to the edu environment."
+              fi
+            elif [[ ${{ contains(github.ref_name, 'dev') }}  == "true" ]]; then
+              branch_name=$(echo "$yq_result" | jq -cr 'map(select(test("dev|edu") | not)) | @json')
+              if [[ $(echo "$branch_name" | wc -l) -eq 0 ]]; then
+                echo "We do not want to deploy automaticaly anywhere."
+              fi
+            fi
+            echo "BRANCH_NAME=$branch_name"
+
+            #Remove string env/
+            # shellcheck disable=SC2001
+            branch_name=$(echo "${branch_name}" | sed "s|env/||g")
+            echo "BRANCH_NAME=$branch_name" >> "$GITHUB_OUTPUT"
+
+        - name: Trigger Workflow
+          if: ${{ steps.environment_list.outputs.BRANCH_NAME != '[]' }}
+          run: |
+            output_file="output.txt"
+
+            branch_name=$(echo "${{env.BRANCH_NAME}}" | tr -d "\"")
+            echo "${{ steps.environment_list.outputs.BRANCH_NAME}} BRANCH_NAME"
+
+            curl -o "${output_file}" -X POST -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{secrets.TECHUSERPAT}}" \
+              https://api.github.com/repos/${{ env.REPO_NAME }}/actions/workflows/${{ env.WORKFLOW_NAME }}/dispatches \
+              -d '{"ref":"refs/heads/master","inputs":{"appName":"${{ env.APP_NAME }}","newVersion":"${{ env.VERSION }}","envName":"'"${branch_name}"'","labelName":"${{ env.LABEL_NAME }}"}}' -s
+            if [[ $(jq '.message' "${output_file}" | wc -l) -gt 0 ]]; then
+              echo "::error::Error message in curl output - $(jq '.message' ${output_file})"
+              exit 1
+            fi
+          env:
+            WORKFLOW_NAME: "setVersion.yml"
+            BRANCH_NAME: ${{ steps.environment_list.outputs.BRANCH_NAME }}
+            APP_NAME: ${{ steps.app_name.outputs.APP_NAME }}
+            LABEL_NAME: ${{ steps.label_name.outputs.LABEL_NAME }}
+            VERSION: ${{ steps.new_version.outputs.NEW_VERSION }}
+            REPO_NAME: ${{ github.repository }}

@@ -1,0 +1,13 @@
+# https://github.com/googleapis/repo-automation-bots/tree/main/packages/release-please#configuration
+handleGHRelease: true
+releaseType: maven
+extraFiles:
+  - README.md
+  - type: yaml
+    path: chart/Chart.yaml
+    jsonpath: $.version
+  - type: yaml
+    path: chart/Chart.yaml
+    jsonpath: $.appVersion
+  - type: pom
+    path: pom.xml

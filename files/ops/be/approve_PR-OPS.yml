@@ -1,0 +1,122 @@
+# Workflows works only on pull_request event and if in the PR are changed minimal one manifest files.
+name: Approve PR on env/* branches
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions: read-all
+
+jobs:
+  prepare:
+    if: >
+      ( contains(github.event.label.name, 'change:implement') &&
+        contains(github.actor, 'csas-ops-change-bot[bot]')
+      )
+    name: Prepare necessary data
+    runs-on: csas-linux
+    permissions:
+      contents: read
+    outputs:
+      MANIFEST: ${{ steps.getChangedFiles.outputs.MANIFEST }}
+    steps:
+      - name: Dump GitHub context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT" 
+      
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for all branches and tags. Necessary for see last commit on base branch
+
+      - name: Get changed files
+        id: getChangedFiles
+        # git diff --diff-filter=d --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }}:
+        #   This command is used to get a list of files that have changed between the base commit of the pull request and the latest commit. 
+        #     The --diff-filter=d option excludes deleted files from the output, and the --name-only option ensures that only the filenames are printed.
+        # grep "manifest-.*\.ya\?ml$":
+        #   This command is used to filter the list of changed files to only those that match the regular expression manifest-.*\.ya?ml.
+        # head -1:
+        #   This command is used to get the first file from the list of changed files. It's enough to get only one file, 
+        #        because we assume that all manifest files are in the same branch.
+        run: |
+          JSON=$(git diff --diff-filter=d --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }} | \
+                 grep "manifest-.*\.ya\?ml$" | head -1)
+          echo "MANIFEST=$JSON"
+          echo "MANIFEST=$JSON" >> "$GITHUB_OUTPUT"
+
+  getPlatformAndConfigServerLabel:
+    name: Auto approve check
+    needs: prepare
+    permissions: read-all
+    uses: csas-ops/inet-ghb-actions/.github/workflows/get-platform_configServer-label.yml@master
+    #uses: ./.github/workflows/get-platform_configServer-label.yml
+    with:
+      manifest: ${{ needs.prepare.outputs.MANIFEST }}
+
+  approvePR:
+    name: Approve PR
+    needs: 
+      - getPlatformAndConfigServerLabel
+      - prepare
+    runs-on: csas-linux
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      PLATFORM: ${{ needs.getPlatformAndConfigServerLabel.outputs.PLATFORM }}
+      LABEL_NAME: ${{ needs.getPlatformAndConfigServerLabel.outputs.LABEL_NAME }}
+      GH_TOKEN: ${{ github.token }} # Its necesary for use GitHub CLI in PR
+    steps:
+      - name: Dump GitHub context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for all branches and tags. Usefull for switch to master bellows
+      
+      - name: Application name
+        id: app_name
+        # Used for get directory name (=APP_NAME) on configServer
+        run: |
+          app_name=$(yq '.metadata.name' ${{ needs.prepare.outputs.MANIFEST }})
+          echo "APP_NAME=$app_name" >> "$GITHUB_OUTPUT" 
+
+      - name: Branch for matrix
+        id: environment_list
+        env:
+          PLATFORM: ${{ needs.getPlatformAndConfigServerLabel.outputs.PLATFORM }}
+          APP_NAME: ${{ steps.app_name.outputs.APP_NAME }}
+          LABEL_NAME: ${{ needs.getPlatformAndConfigServerLabel.outputs.LABEL_NAME }}
+
+        # Get values from master branch from application.yml file from parameter x-setVersionOnBranches
+        # check that name of branch base name is in the list (grep "${{ github.base_ref }}")
+        # remove comma and double quotes (sed "s/[,\"]//g")
+        # convert to json (jq -cr '@json')
+        run: |
+          git checkout master
+          yq eval '.["x-setVersionOnBranches"]' -o=json configServer/${{ env.LABEL_NAME }}/${{ env.APP_NAME }}/application.yml | grep "${{ github.base_ref }}" | tr -d '",  '
+
+          branch_name=$(yq eval '.["x-setVersionOnBranches"]' -o=json configServer/${{ env.LABEL_NAME }}/${{ env.APP_NAME }}/application.yml | \
+                        grep "${{ github.base_ref }}" | tr -d '",  '  ) 
+
+          echo "branch_name=${branch_name}"
+          echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
+      
+      - name: Approve PR
+        if: ${{ steps.environment_list.outputs.branch_name == github.base_ref }}
+        run: |
+          gh pr review --approve ${{ github.event.pull_request.number }}
+        env:
+          GH_TOKEN: ${{ secrets.TECHUSERPAT }}
+
+      - name: Automerge enabled
+        if: ${{ steps.environment_list.outputs.branch_name == github.base_ref }}
+        run: |
+          gh pr merge --auto --rebase ${{ github.event.pull_request.number }}
+        env:
+          GH_TOKEN: ${{ secrets.TECHUSERPAT }}

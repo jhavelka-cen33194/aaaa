@@ -1,0 +1,18 @@
+name: Manual LAF WLS Application deployment
+run-name: Manual LAF WLS Application deployment ${{ inputs.manifest-file }} on ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest-file:
+        description: Manifest file name
+        type: string
+
+concurrency: ci-${{ github.ref }}
+
+jobs:
+  deploy:
+    secrets: inherit
+    uses: csas-actions/devops-platform-cd-laf/.github/workflows/laf_wls_deploy_application.yml@master
+    with:
+      manifest-file: ${{ inputs.manifest-file }}

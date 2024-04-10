@@ -1,0 +1,7 @@
+# https://github.com/googleapis/repo-automation-bots/tree/main/packages/release-please#configuration
+handleGHRelease: true
+releaseType: maven
+extraFiles:
+  - README.md
+  - type: pom
+    path: pom.xml

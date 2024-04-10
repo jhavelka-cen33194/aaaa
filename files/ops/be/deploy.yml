@@ -1,0 +1,278 @@
+name: Deploy
+run-name: Deploy ${{ github.event.pull_request.title }} ${{ github.base_ref }} ${{ github.event.label.name }}' || '${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        type: string
+        description: 'Application name (name of yaml file where store app number)'
+        required: true
+  pull_request:
+    types: [labeled]
+
+jobs:
+  prepare:
+    runs-on: 'csas-linux'
+    if: >
+      (
+        ( contains(github.event.label.name, 'change:implement') &&
+          contains(github.actor, 'csas-ops-change-bot[bot]')
+        ) ||
+        github.event_name == 'workflow_dispatch'
+      )
+    outputs:
+      DEPLOY_ENV: ${{ steps.envir.outputs.DEPLOY_ENV }}
+      APP_NAME: ${{ steps.app_name.outputs.APP_NAME }}
+      NEXT_VERSION: ${{ steps.app_version.outputs.NEXT_VERSION }}
+      CURL_ALLOWED: ${{ steps.app_version.outputs.CURL_ALLOWED }}
+      AFFECTED_JSON: ${{ steps.app_name.outputs.AFFECTED_JSON }}
+    steps:
+      - name: Dump GitHub context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT"
+
+      - name:  Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+
+      - name: Prepare env
+        id: envir
+        run: |
+          refName=${{ github.base_ref}}
+          [[ -z "${refName}" ]] && refName=${{ github.ref}}
+          echo "DEPLOY_ENV=${refName##*/}"
+          echo "DEPLOY_ENV=${refName##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Find application name
+        id: app_name
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ${{ github.event_name }} == "pull_request" ]]; then
+            TMP_FILE_NAME=$(gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files.[].path' | grep yaml)
+            if [[ $(echo "${TMP_FILE_NAME}" | wc -w) -gt 1 ]]; then
+              echo "APP_NAME=${TMP_FILE_NAME}" | tr "\n" " " | sed "s/\.yaml//g" >> "$GITHUB_OUTPUT"
+            else
+              echo "APP_NAME=${TMP_FILE_NAME}" | sed "s/\.yaml//g" >> "$GITHUB_OUTPUT"
+            fi
+            AFFECTED_LIST=$(echo "${TMP_FILE_NAME}" | tr "\n" " " | sed "s/\.yaml//g")
+            AFFECTED_JSON=$(echo "${AFFECTED_LIST}" | jq -R -s -c 'split("\n")[:-1]' | jq -c '{"affected": .}')
+            echo "AFFECTED_JSON=${AFFECTED_JSON}" >> $GITHUB_OUTPUT
+          else
+            echo "Nejedna se  PR, nemam co zjistovat"
+          fi
+
+      - name: Find application version
+        id: app_version
+        run: |
+          if [[ $(echo ${{ steps.app_name.outputs.APP_NAME }} | wc -w) -gt 1 ]]; then
+            echo "CURL_ALLOWED=false" >> "$GITHUB_OUTPUT"
+            echo "CURL_ALLOWED=false ==> Je vice menenych aplikaci, nepovolime automaticky deploy na INT a PRS" >> "$GITHUB_STEP_SUMMARY"
+          else
+            if [[ ${{ github.event_name }} == "workflow_dispatch" ]]; then
+              file_name="${{ inputs.app_name }}.yaml"
+              echo "CURL_ALLOWED=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "CURL_ALLOWED=true" >> "$GITHUB_OUTPUT"
+              file_name="$(echo ${{ steps.app_name.outputs.APP_NAME }} | sed "s/ $//").yaml"
+            fi
+            sed -n "s/\(.*targetRevision: \)\(.*$\)/NEXT_VERSION=\2/p"  "${file_name}" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy:
+    name: Deploy
+    if: >
+      (
+        ( contains(github.event.label.name, 'change:implement') &&
+          contains(github.actor, 'csas-ops-change-bot[bot]')
+        ) ||
+        github.event_name == 'workflow_dispatch'
+      )
+    needs: prepare
+    #uses: csas-actions/read-app-metadata/.github/workflows/ocp3-upgrade-apps.yml@v1
+    uses: csas-ops/inet-ghb-actions/.github/workflows/ocp3-upgrade-apps.yml@master
+    with:
+      sas: SAS_NAHRAD
+      environment: ${{ needs.prepare.outputs.DEPLOY_ENV }}
+    secrets:
+      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+      OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
+      OPENSHIFT_CA: ${{ secrets.OPENSHIFT_CA }}
+
+  run-test:
+    needs: [prepare,deploy]
+    strategy:
+      max-parallel: 4
+      matrix: ${{fromJson(needs.prepare.outputs.AFFECTED_JSON)}}
+    uses: csas-ops/inet-ghb-actions/.github/workflows/newman-test-2.yml@master
+    with:
+      ENVIRONMENT: ${{ github.base_ref }}
+      REPOSITORY-NAME: inet-tests
+      REPO-TESTS-SUBDIR: postman
+      PLATFORM: ocp3
+      COLLECTION-NAME: ${{ matrix.affected }}
+      SAFE-FULL: safe
+      USE-BETA-RUNNER: false
+    secrets:
+      TESTS_REPO_KEY: ${{ secrets.INET_TESTS_DEPLOY_KEY }}
+
+  SetVersionOnINT:
+    runs-on: csas-linux
+    if: >
+      (
+        ( contains(github.event.label.name, 'change:implement') &&
+          contains(github.actor, 'csas-ops-change-bot[bot]')
+        ) &&
+        github.event.pull_request.base.ref == 'env/deva' &&
+        needs.prepare.outputs.CURL_ALLOWED == 'true'
+      )
+    needs: [prepare,deploy]
+    steps:
+      - name: Set version
+        #if: (contains(github.actor, 'csas-dev-release-please[bot]') && ! contains(github.event.pull_request.title, '-SNAPSHOT') )
+        id: version
+        env:
+          app_name: "${{ needs.prepare.outputs.APP_NAME }}"
+          app_version: "${{ needs.prepare.outputs.NEXT_VERSION }}"
+        run: |
+          echo "APP=${app_name}"
+          # release-please vytvori Release dle vzoru vX.X.X
+          #   musime odebrat v ze jmana, protoze artefact v Artifactory ho ve jmene nema
+          #     ==> ${NEXT_VERSION#v}
+          curl -X POST -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{secrets.TECHUSERPAT}}" \
+            https://api.github.com/repos/csas-ops/OPS_REPO_NAHRAD/actions/workflows/set_version.yml/dispatches \
+            -d '{"ref":"refs/heads/master","inputs":{"serviceName":"'"${app_name}"'","nextVersion":"'"${app_version}"'","branch":"env/int"}}' -s
+
+  SetVersionOnPRS:
+    runs-on: csas-linux
+    needs: [prepare,deploy]
+    if: >
+      (
+        ( contains(github.event.label.name, 'change:implement') &&
+          contains(github.actor, 'csas-ops-change-bot[bot]')
+        ) &&
+        github.event.pull_request.base.ref == 'env/deva' &&
+        needs.prepare.outputs.CURL_ALLOWED == 'true'
+      )
+    steps:
+      - name: Set version
+        #if: (contains(github.actor, 'csas-dev-release-please[bot]') && ! contains(github.event.pull_request.title, '-SNAPSHOT') )
+        id: version
+        env:
+          app_name: "${{ needs.prepare.outputs.APP_NAME }}"
+          app_version: "${{ needs.prepare.outputs.NEXT_VERSION }}"
+        run: |
+          # release-please vytvori Release dle vzoru vX.X.X
+          #   musime odebrat v ze jmana, protoze artefact v Artifactory ho ve jmene nema
+          #     ==> ${NEXT_VERSION#v}
+          curl -X POST -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{secrets.TECHUSERPAT}}" \
+            https://api.github.com/repos/csas-ops/OPS_REPO_NAHRAD/actions/workflows/set_version.yml/dispatches \
+            -d '{"ref":"refs/heads/master","inputs":{"serviceName":"'"${app_name}"'","nextVersion":"'"${app_version}"'","branch":"env/prs"}}' -s
+
+  commentPR:
+    runs-on: csas-linux
+    needs: [prepare,deploy,SetVersionOnINT,SetVersionOnPRS]
+    if: >
+      (
+        ( contains(github.event.label.name, 'change:implement') &&
+          contains(github.actor, 'csas-ops-change-bot[bot]')
+        ) &&
+        github.event.pull_request.base.ref == 'env/deva'
+      )
+    steps:
+      - uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // 1. Retrieve existing bot comments for the PR
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            })
+            const botComment = comments.find(comment => {
+              return comment.user.type === 'Bot' && comment.body.includes('Terraform Format and Style')
+            })
+
+            // 2. Prepare format of the comment
+            const output = `
+            ### The deployment has been started on INT and PRS environment
+
+            | Application | Version |
+            |-------------|---------|
+            ***${{ needs.prepare.outputs.APP_NAME }}*** | ***${{ needs.prepare.outputs.NEXT_VERSION }}*** |
+
+            `;
+
+            // 3. If we have a comment, update it, otherwise create a new one
+            if (botComment) {
+              github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: output
+              })
+            } else {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: output
+              })
+            }
+
+  closePR:
+    name: Close Pull request
+    runs-on: 'csas-linux'
+    if: >
+      ( contains(github.event.label.name, 'change:implement') &&
+        contains(github.actor, 'csas-ops-change-bot[bot]') &&
+        always()
+      )
+    needs: [prepare,deploy,SetVersionOnINT,SetVersionOnPRS,commentPR]
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name:  Checkout
+        uses: actions/checkout@v4
+
+      - name: Automerge enabled
+        if: needs.deploy.result == 'success'
+        run: |
+          gh pr merge --auto --rebase ${{ github.event.pull_request.number }}
+
+      - name: PR comment success
+        if: needs.deploy.result == 'success'
+        run: |
+          for attempts in {1..5}
+          do
+            if [[ $(gh pr view ${{ github.event.pull_request.number }} --json state --jq '.state') == "MERGED" ]]; then
+              date +'%d.%m.%Y %H:%M:%S'
+              if [[ $(gh pr view ${{ github.event.pull_request.number }} --json comments --jq '.comments[] | select(.author.login == "github-actions") | select(.body == "/success")| .body' | wc -l) -eq 0 ]]; then
+                gh pr comment ${{ github.event.pull_request.number }} --body "/success"
+                break
+              fi
+            else
+              echo "Pull request does not have the state set to merged. Waiting 5 s."
+              sleep 5
+              if [[ "${attempts}" -eq 5 ]]; then
+                echo "This is last attempt, I'm ending."
+                exit 1
+              fi
+            fi
+          done
+
+      - name: PR close - deployment failed
+        if: >
+          needs.deploy.result != 'success' &&
+          github.event.pull_request.base.ref != 'env/prod' &&
+          always()
+        run: |
+          gh pr close ${{ github.event.pull_request.number }}

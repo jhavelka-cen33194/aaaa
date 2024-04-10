@@ -1,0 +1,50 @@
+name: Change version
+run-name: Change version to ${{inputs.nextVersion}} on ${{inputs.serviceName}} in branch ${{inputs.branch}}
+
+on:
+  workflow_dispatch:
+    inputs:
+      serviceName:
+        description: 'Name of the service'
+        required: true
+      nextVersion:
+        description: 'Next version'
+        required: true
+      branch:
+        description: Branch where change the version of APP
+        required: true
+#  pull_request:
+#    branches: [ "**" ]
+
+jobs:
+  createPR:
+    runs-on: csas-linux
+    permissions: write-all
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch}}
+
+      - name: Set version
+        id: version
+        run: |
+          echo ${GITHUB_REPOSITORY#*/}
+          echo "current_version=$(sed -n "s/\(.*targetRevision: \)\(.*$\)/\2/p" ${{inputs.serviceName}}.yaml)" >> "$GITHUB_ENV"
+          sed -i "s/\(.*targetRevision: \)\(.*$\)/\1${{inputs.nextVersion}}/" ${{inputs.serviceName}}.yaml
+
+      - name: Dump GitHub context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT"
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          title: "${{inputs.serviceName}} ${{env.current_version}} --> ${{inputs.nextVersion}}"
+          commit-message: "New version on ${{inputs.serviceName}} from ${{env.current_version}} to ${{inputs.nextVersion}}"
+          body: "New version on ${{inputs.serviceName}} from ${{env.current_version}} to ${{inputs.nextVersion}}"
+          branch: new_version/${{inputs.serviceName}}/${{ inputs.branch }}
+          labels: ${{github.ref_name}}

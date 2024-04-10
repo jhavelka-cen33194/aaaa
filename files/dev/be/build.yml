@@ -1,0 +1,36 @@
+name: Build application
+
+on:
+  workflow_dispatch:
+#  push:
+#    branches: [ "master" ]
+#    tags: [ "v*" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  callBuilds:
+    uses: csas-dev/inet-ghb-actions/.github/workflows/ci_java_build.yml@master
+    permissions:
+      contents: read
+    with:
+      CHART_REPOSITORY: CHART_REPO_NAHRAD
+      IMAGE_REPOSITORY: IMAGE_REPO_NAHRAD
+      HELM_CHARTS: HELM_CHARTS_NAHRAD
+      JAVA_VERSION: JAVA_VERSION_NAHRAD
+      BUILD_AUTOMATION_TOOL: GRADLE_MAVEN_NAHRAD
+    secrets:
+      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  SecurityScan-TrivyScan:
+    uses: csas-dev/inet-ghb-actions/.github/workflows/java_trivy_scan.yml@master
+    needs: callBuilds
+    permissions:
+      contents: read
+    with:
+      DOCKER_IMAGE: ${{ needs.callBuilds.outputs.DOCKER_IMAGE }}
+      IMAGE_SHORT_NAME: ${{ needs.callBuilds.outputs.IMAGE_SHORT_NAME }}
+    secrets:
+      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}

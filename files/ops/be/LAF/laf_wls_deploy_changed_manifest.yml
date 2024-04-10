@@ -1,0 +1,44 @@
+name: Deploy changed manifest files
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  config-manifest:
+    outputs:
+      data: ${{ steps.manifest.outputs.manifests }}
+    runs-on:
+      - csas-linux
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find changed manifest files
+        id: manifest
+        run: |
+          JSON=$(git diff --diff-filter=d --name-only HEAD^ | grep "manifest-.*\.ya\?ml$" | xargs jq -c -n '$ARGS.positional' --args --)
+          echo "::debug::modified manifest files JSON: $JSON"
+          echo "manifests=$JSON" >> $GITHUB_OUTPUT
+
+  deploy-laf-wls:
+    if: needs.config-manifest.outputs.data != '[]'
+    name: ${{ matrix.manifest }}
+    needs: [config-manifest]
+    secrets: inherit
+    strategy:
+      matrix:
+        manifest: ${{ fromJson(needs.config-manifest.outputs.data) }}
+    uses: csas-actions/devops-platform-cd-laf/.github/workflows/laf_wls_deploy_application.yml@master
+    with:
+      manifest-file: ${{ matrix.manifest }}
+
+  cho:
+    if: failure()
+    needs:
+      - deploy-laf-wls
+    uses: csas-actions/devops-platform-cd-common/.github/workflows/close-change-order.yml@master
+    with:
+      result: ${{ needs.deploy-laf-wls.result }}

@@ -1,0 +1,146 @@
+name: Deploy changed manifest files
+
+on:
+  workflow_call:
+    outputs:
+      manifestData: 
+        description: 'Manifest data'
+        value: ${{ jobs.config-manifest.outputs.data }}
+  workflow_dispatch:
+
+jobs:
+  config-manifest:
+    outputs:
+      data: ${{ steps.manifest.outputs.manifests }}
+      data-wls: ${{ steps.wls-manifest.outputs.manifests }}
+      data-cdn: ${{ steps.cdn-manifest.outputs.manifests }}
+      data-ocp4: ${{ steps.ocp4-manifest.outputs.manifests }}
+    runs-on:
+      - ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find changed manifest files
+        id: manifest
+        run: |
+          # Exclude deleted and renamed paths
+          JSON=$(git diff --diff-filter=dr --name-only HEAD^ | grep "manifest-.*\.ya\?ml$" | xargs jq -c -n '$ARGS.positional' --args --)
+          echo "::debug::modified manifest files JSON: $JSON"
+          echo "manifests=$JSON" >> $GITHUB_OUTPUT
+
+      - name: Filter WebLogic manifests
+        id: wls-manifest
+        run: |
+          JSON=$(jq -c '[.[] | select(contains("Weblogic"))]' <<< $CHANGED_MANIFESTS)
+          echo "::debug::modified manifest files JSON: $JSON"
+          echo "modified manifest files JSON: $JSON"
+          echo "manifests=$JSON" >> $GITHUB_OUTPUT
+        env:
+          CHANGED_MANIFESTS: ${{ steps.manifest.outputs.manifests }}
+
+      - name: Filter CDN manifests
+        id: cdn-manifest
+        run: |
+          echo "$CHANGED_MANIFESTS"
+          set -x
+          JSON=$(jq -c '[.[] | select(contains("StorageAccount"))]' <<< $CHANGED_MANIFESTS)
+          echo "::debug::modified manifest files JSON: $JSON"
+          echo "manifests=$JSON" >> $GITHUB_OUTPUT
+        env:
+          CHANGED_MANIFESTS: ${{ steps.manifest.outputs.manifests }}
+
+      - name: Filter OCP4 manifests
+        id: OCP4-manifest
+        run: |
+          JSON=$(jq -c '[.[] | select(contains("ocp4"))]' <<< $CHANGED_MANIFESTS)
+          echo "::debug::modified manifest files JSON: $JSON"
+          echo "manifests=$JSON" >> $GITHUB_OUTPUT
+        env:
+          CHANGED_MANIFESTS: ${{ steps.manifest.outputs.manifests }}
+
+  deploy-laf-wls:
+    if: contains(needs.config-manifest.outputs.data, 'Weblogic')
+    name: ${{ matrix.manifest }}
+    needs: [config-manifest]
+    secrets: inherit
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest: ${{ fromJson(needs.config-manifest.outputs.data-wls) }}
+      max-parallel: 1
+    uses: csas-actions/devops-platform-cd-laf/.github/workflows/laf_wls_deploy_application.yml@v1
+    with:
+      manifest-file: ${{ matrix.manifest }}
+
+  deploy-cdn:
+    if: contains(needs.config-manifest.outputs.data, 'StorageAccount')
+    name: ${{ matrix.manifest }}
+    needs: [config-manifest]
+    secrets: inherit
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest: ${{ fromJson(needs.config-manifest.outputs.data-cdn) }}
+      max-parallel: 1
+    uses: csas-actions/devops-platform-cd-cdn/.github/workflows/cdn_deploy_application.yml@v1
+    with:
+      manifest-file: ${{ matrix.manifest }}
+  
+  deploy-ocp4:
+    if: contains(needs.config-manifest.outputs.data, 'ocp4')
+    needs: [config-manifest]
+    secrets: inherit
+    uses: csas-actions/devops-platform-cd-common/.github/workflows/argocd-validate-deploy.yml@v1
+
+  cho-failure:
+    if: failure()
+    needs:
+      - deploy-laf-wls
+    uses: csas-actions/devops-platform-cd-common/.github/workflows/close-change-order.yml@v1
+    with:
+      result: ${{ needs.deploy-laf-wls.result }}
+  
+  lafPostmanTests:
+    needs: 
+      - deploy-laf-wls
+      - config-manifest
+    if: contains(needs.config-manifest.outputs.data, 'Weblogic')
+    strategy:
+      max-parallel: 4
+      matrix: 
+        manifest: ${{ fromJson(needs.config-manifest.outputs.data-wls) }}
+    uses: csas-ops/inet-ghb-actions/.github/workflows/newman-test-2.yml@master
+    with:
+      ENVIRONMENT: ${{ github.ref_name }}
+      REPOSITORY-NAME: inet-tests
+      REPO-TESTS-SUBDIR: postman
+      PLATFORM: laf
+      COLLECTION-NAME: ${{ matrix.manifest }}
+      SAFE-FULL: safe
+      USE-BETA-RUNNER: false
+    secrets:
+        TESTS_REPO_KEY: ${{ secrets.INET_TESTS_DEPLOY_KEY }}
+
+  ocp4PostmanTests:
+    needs: 
+      - deploy-ocp4
+      - config-manifest
+    if: contains(needs.config-manifest.outputs.data, 'ocp4')
+    strategy:
+      max-parallel: 4
+      matrix: 
+        manifest: ${{ fromJson(needs.config-manifest.outputs.data-ocp4) }}
+    uses: csas-ops/inet-ghb-actions/.github/workflows/newman-test-2.yml@master
+    with:
+      ENVIRONMENT: ${{ github.ref_name }}
+      REPOSITORY-NAME: inet-tests
+      REPO-TESTS-SUBDIR: postman
+      PLATFORM: ocp4
+      COLLECTION-NAME: ${{ matrix.manifest }}
+      SAFE-FULL: safe
+      USE-BETA-RUNNER: false
+    secrets:
+        TESTS_REPO_KEY: ${{ secrets.INET_TESTS_DEPLOY_KEY }}

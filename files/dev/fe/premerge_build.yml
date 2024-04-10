@@ -1,0 +1,64 @@
+name: Premerge build TYPE_NAHRAD
+
+on:
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+    ARTIFACT_EXPIRE:
+      description: 'Add expire suffix to filename in artifactory?'
+      required: true
+      default: true
+      type: boolean
+
+jobs:
+  call-PreMerge-Build:
+    uses: csas-dev/inet-ghb-actions/.github/workflows/fe_main_build.yml@master
+    permissions:
+      contents: read
+    with:
+      # Artifact that will be pushed on Artifactory - later unpacked from zip and deployed to AzureCDN
+      ARTIFACT_NAME: REPO_NAHRAD
+      # Build for listed environments
+      BUILD-ENVIRONMENT: '["ENV_NAHRAD"]'
+      # NodeJS version to use
+      NODE-VERSION: NODE_VERSION_NAHRAD
+      # Project package in Artifactory
+      REPOSITORY_NAME: ARTIFACTORY_REPO_NAME_NAHRAD
+      # Static content that will be deployed on AzureCDN, either file or build output directory
+      SRC: SRC_DIR_NAHRAD
+      BUILD_LIBRARY: LIBRARY_NAHRAD
+      # Add expire suffix to filename in artifactory?
+      ARTIFACT_EXPIRE: ${{ inputs.ARTIFACT_EXPIRE > '' && inputs.ARTIFACT_EXPIRE || false }}
+    secrets:
+      ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  call-PreMerge-SecurityScan-Trivy:
+    runs-on: csas-linux
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Filesystem scan
+        uses: csas-actions/trivy-action@v1
+        with:
+          scan-type: filesystem
+          scan-ref: .
+          ignore-unfixed: true
+          severity: MEDIUM,HIGH,CRITICAL
+          exit-code: 1
+
+      - name: Misconfiguration scan by Trivy
+        uses: csas-actions/trivy-action@v1
+        if: always()
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: MEDIUM,HIGH,CRITICAL
+          exit-code: 1
+          # Output to the job summary instead of logs
+          output: ${{ github.step_summary }}
+          # NOTE this currently produces some garbage, waiting for https://github.com/aquasecurity/trivy/issues/3201
+          template: '@/contrib/html.tpl'

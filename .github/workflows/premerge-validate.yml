@@ -1,0 +1,341 @@
+name: Validate terraform module
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+env:
+  tf_actions_working_dir: './examples/'
+  ARM_CLIENT_ID: ${{ secrets.AZURE_AD_CLIENT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+  ARM_USE_OIDC: true
+  SA_PRIVATE_ENDPOINTS: "inetterraformghbintsa01.blob.core.windows.net"
+  ERR: false
+
+permissions: read-all
+
+
+jobs:
+  calledPreCommit:
+    permissions:
+      id-token: write
+      contents: read
+    uses: csas-dev/inet-ghb-actions/.github/workflows/ci-pre-commit-checks.yml@master
+    with:
+      ARM_USE_OIDC: true
+      SA_PRIVATE_ENDPOINTS: "inetterraformghbintsa01.blob.core.windows.net"
+      ENVIRONMENT: dev
+    secrets: inherit
+
+  validateTFModule:
+    needs: calledPreCommit
+    environment: dev
+    env:
+      TF_VAR_csas_inet_dev_token: ${{ secrets.CSAS_INET_DEV_TOKEN}}
+    defaults:
+      run:
+        working-directory: ${{ env.tf_actions_working_dir }}
+    runs-on: csas-linux
+    #need pull-request write for create/update comment in Pull Request
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+
+    steps:
+    # Checkout
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # Whole history is needed for Sonar scan
+
+    - uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_wrapper: false
+        terraform_version: 1.4.2
+
+    - name: Allow Terraform to use Artifactory
+      if: contains(github.event.repository.name,'terraform')
+      run: |
+        cat <<EOFF >> ~/.terraformrc
+          provider_installation {
+            direct {
+                exclude = ["registry.terraform.io/*/*"]
+            }
+            network_mirror {
+                url = "https://artifactory.csin.cz/artifactory/api/terraform/registry-terraform-io-github-com/providers/"
+            }
+          }
+        EOFF
+
+    - name: "Set DNS servers to TEST based on targetEnv"
+      run: |
+        echo -e "nameserver 10.190.22.168\nnameserver 10.190.48.168" | sudo tee /etc/resolv.conf
+
+    - name: 'Az CLI login'
+      uses: azure/login@v1
+      with:
+        client-id: ${{ secrets.AZURE_AD_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_AD_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Terraform Init
+      id: init
+      env:
+        token: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN}}
+      run: |
+        export NO_PROXY="$NO_PROXY,${SA_PRIVATE_ENDPOINTS}"
+        export no_proxy="$no_proxy,${SA_PRIVATE_ENDPOINTS}"
+        export TF_TOKEN_artifactory_csin_cz="${token}"
+
+        terraform version -no-color
+        terraform init -upgrade -no-color
+
+    - name: Terraform fmt
+      id: fmt
+      #-check -> Don't write changes to file
+      #-recursive -> include subdirectories
+      #-diff -> display diffs of formating chanes
+      run: |
+        if ! terraform fmt -check -recursive -diff -no-color; then
+          echo "ERR=true" >> "$GITHUB_ENV"
+          exit 1
+        fi
+        echo "stdout=$(terraform fmt -check -recursive -diff -no-color)" >> "$GITHUB_OUTPUT"
+      continue-on-error: true
+
+    - name: Terraform Validate
+      id: validate
+      run: |
+        if ! terraform validate -no-color; then
+          echo "ERR=true" >> "$GITHUB_ENV"
+          exit 1
+        fi
+        echo "stdout=$(terraform validate -no-color)" >> "$GITHUB_OUTPUT"
+      continue-on-error: true
+
+    - name: Import objects
+      if: github.repository == 'csas-dev/inet-terraform-ghb-modul-repositories'
+      run: |
+        export NO_PROXY="$NO_PROXY,${SA_PRIVATE_ENDPOINTS}"
+        export no_proxy="$no_proxy,${SA_PRIVATE_ENDPOINTS}"
+        terraform import module.repo.github_repository.repo[\"inet-terraform-ghb-test\"] inet-terraform-ghb-test
+
+        #terraform import module.repo.github_actions_repository_permissions.permitions[\"inet-terraform-ghb-test\"] inet-terraform-ghb-test
+
+        #terraform import module.repo.github_repository_autolink_reference.autolink[\"inet-terraform-ghb-test\"] inet-terraform-ghb-test/FH-
+
+        #terraform import module.repo.github_repository_autolink_reference.defects[\"inet-terraform-ghb-test\"] inet-terraform-ghb-test/DF-
+      working-directory: examples
+
+    - name: Terraform plan
+      id: plan
+      run: |
+        export NO_PROXY="$NO_PROXY,${SA_PRIVATE_ENDPOINTS}"
+        export no_proxy="$no_proxy,${SA_PRIVATE_ENDPOINTS}"
+        echo "nepovedlo se vytvorit plan" > "${GITHUB_WORKSPACE}"/plan.out
+        if ! terraform plan -out myplan; then
+          echo "ERR=true" >> "$GITHUB_ENV"
+          exit 1
+        fi
+        terraform show -no-color myplan > "${GITHUB_WORKSPACE}"/plan.out
+      working-directory: examples
+      continue-on-error: true
+
+    - name: Terraform apply
+      id: apply
+      run: |
+        export NO_PROXY="$NO_PROXY,${SA_PRIVATE_ENDPOINTS}"
+        export no_proxy="$no_proxy,${SA_PRIVATE_ENDPOINTS}"
+        if ! terraform apply -auto-approve myplan -no-color; then
+          echo "ERR=true" >> "$GITHUB_ENV"
+          exit 1
+        fi
+      working-directory: examples
+      continue-on-error: true
+
+    - name: Reset settings of repository
+      if: github.repository == 'csas-dev/inet-terraform-ghb-modul-repositories'
+      run: |
+        export NO_PROXY="$NO_PROXY,${SA_PRIVATE_ENDPOINTS}"
+        export no_proxy="$no_proxy,${SA_PRIVATE_ENDPOINTS}"
+        # Remove objects which can't destroy due to GitHub permissions
+        #terraform state rm module.repo.github_actions_repository_permissions.permitions[\"inet-terraform-ghb-test\"]
+        terraform state rm module.repo.github_repository.repo[\"inet-terraform-ghb-test\"]
+        #terraform state rm module.repo.github_repository_autolink_reference.autolink[\"inet-terraform-ghb-test\"]
+        #terraform state rm module.repo.github_repository_autolink_reference.defects[\"inet-terraform-ghb-test\"]
+
+        # Prepare rest of Terraform objects for deleting
+        rm locals_branch_specifics.tf
+        mv revert_locals_branch_specifics.tmp revert_locals_branch_specifics.tf
+
+    - name: Terraform destroy
+      id: destroy
+      run: |
+        export NO_PROXY="$NO_PROXY,${SA_PRIVATE_ENDPOINTS}"
+        export no_proxy="$no_proxy,${SA_PRIVATE_ENDPOINTS}"
+        if ! terraform destroy -auto-approve -no-color; then
+          echo "ERR=true" >> "$GITHUB_ENV"
+          exit 1
+        fi
+      working-directory: examples
+      continue-on-error: true
+
+    - name: SonarQube Test
+      id: SonarQube
+      env:
+        SONAR_SCANNER_VERSION: 4.6.2.2472
+      run: |
+        cd ..
+        wget -q https://artifactory.csin.cz:443/artifactory/devtools-generic-local/sonar-scanner-cli/sonar-scanner-cli-${{env.SONAR_SCANNER_VERSION}}-linux.zip
+        unzip -q ./sonar-scanner-cli-${{env.SONAR_SCANNER_VERSION}}-linux.zip
+        rm ./sonar-scanner-cli-${{ env.SONAR_SCANNER_VERSION }}-linux.zip
+        [ -d "sonar-scanner-${{env.SONAR_SCANNER_VERSION}}-linux" ] && [ ! -d "sonar-scanner" ] && mv "sonar-scanner-${{env.SONAR_SCANNER_VERSION}}-linux" "sonar-scanner"
+        [ ! -f ./sonar-scanner/conf/sonar-scanner.properties ] && echo "Sonar config file not found" && exit 1
+        chmod +x ./sonar-scanner/bin/sonar-scanner
+        ./sonar-scanner/bin/sonar-scanner -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+        echo "===== report-task.txt content ====="
+        cat .scannerwork/report-task.txt
+        echo "==================================="
+        rm -rf .scannerwork/
+        echo 'SonarScanResult="Sonar Scan completed."' >> "$GITHUB_OUTPUT"
+        echo '::notice title=Sonar scan result::  - completed'
+
+    - name: Filesystem scan
+      uses: csas-actions/trivy-action@v1
+      with:
+        scan-type: filesystem
+        scan-ref: .
+        ignore-unfixed: true
+        severity: MEDIUM,HIGH,CRITICAL
+        exit-code: 1
+
+    - name: Misconfiguration scan by Trivy
+      uses: csas-actions/trivy-action@v1
+      if: always()
+      with:
+        scan-type: config
+        scan-ref: .
+        severity: MEDIUM,HIGH,CRITICAL
+        exit-code: 1
+        # Output to the job summary instead of logs
+        output: ${{ github.step_summary }}
+        # NOTE this currently produces some garbage, waiting for https://github.com/aquasecurity/trivy/issues/3201
+        template: '@/contrib/html.tpl'
+        args: --policy-bundle-repository=artifactory.csin.cz/ghcr-io/aquasecurity/defsec:0
+
+    - name: Prepare job output
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+        SUM=$(cat <<EOFF
+        #### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+
+          <details><summary>Format Output</summary>
+          \`\`\`\n
+          ${{ steps.fmt.outputs.stdout }}
+          \`\`\`
+          </details>
+
+          #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+
+          <details><summary>Validation Output</summary>
+
+          \`\`\`\n
+          ${{ steps.validate.outputs.stdout }}
+          \`\`\`
+          </details>
+
+          #### Terraform plan 🤖\`${{ steps.plan.outcome }}\`
+
+          <details><summary>Plan Output</summary>
+
+          \`\`\`\n
+          ${{ steps.plan.outputs.stdout }}
+          \`\`\`
+          </details>
+
+          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`${{ env.tf_actions_working_dir }}\`, Workflow: \`${{ github.workflow }}\`*
+        EOFF
+        )
+        echo $SUM >> $GITHUB_STEP_SUMMARY
+
+    - uses: actions/github-script@v7
+      if: github.event_name == 'pull_request'
+      #env:
+      #  PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          // 1. Retrieve existing bot comments for the PR
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          })
+
+          const botComment = comments.find(comment => {
+            return comment.user.type === 'Bot' && comment.body.includes('Terraform Format and Style')
+          })
+
+          const run_url = process.env.GITHUB_SERVER_URL + '/' + process.env.GITHUB_REPOSITORY + '/actions/runs/' + process.env.GITHUB_RUN_ID
+          const run_link = '<a href="' + run_url + '">Actions</a>.'
+          const fs = require('fs')
+          const plan_file = fs.readFileSync('plan.out', 'utf8')
+          const plan = plan_file.length > 65000 ? plan_file.toString().substring(0, 65000) + " ..." : plan_file
+          const truncated_message = plan_file.length > 65000 ? "Output is too long and was truncated. You can read full Plan in " + run_link + "<br /><br />" : ""
+
+          // 2. Prepare format of the comment
+          const output = `
+          #### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+          <details><summary>Format Output</summary>
+
+          \`\`\`\n
+          ${{ steps.fmt.outputs.stdout }}
+          \`\`\`
+
+          </details>
+
+          #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+          <details><summary>Validation Output</summary>
+
+          \`\`\`\n
+          ${{ steps.validate.outputs.stdout }}
+          \`\`\`
+          </details>
+
+          #### Terraform plan 🤖\`${{ steps.plan.outcome }}\`
+          <details><summary>Plan Output</summary>
+
+          \`\`\`\n
+          ${plan}
+          \`\`\`
+          ${truncated_message}
+          </details>
+
+          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`${{ env.tf_actions_working_dir }}\`, Workflow: \`${{ github.workflow }}\`*`;
+
+          // 3. If we have a comment, update it, otherwise create a new one
+          if (botComment) {
+            github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: output
+            })
+          } else {
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+          }
+    - name: Check on error
+      id: check_errors
+      run: |
+        if [[ ${{ env.ERR }} == true ]]; then
+          echo chyba
+          exit 1
+        fi

@@ -1,0 +1,37 @@
+name: 'pre-commit checks'
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  pre-commit:
+    runs-on: [ csas-linux ]
+    timeout-minutes: 15
+    steps:
+      # Checkout all history of repository (unknown number of commit in Pull Request)
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # prepare tools
+      - run: python -m pip install pre-commit
+      - run: python -m pip freeze --local
+      - uses: actions/cache@v3
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-3|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
+
+      #run test (pre-commit)
+      #  git diff - list changed files
+      #    --diff-filter Added (A), Copied (C), Modified (M), Renamed (R), changed (T) (see https://git-scm.com/docs/git-diff)
+      - run: |
+          export PATH=$PATH:/home/runner/.local/bin
+          pre-commit run --show-diff-on-failure --color=always --files $(git diff --name-only --diff-filter=ACMRT ${{ github.event.pull_request.base.sha }} ${{ github.sha }} |  tr "\n" " ")
+# toto je treba jen pokud bychom chteli spoustet na event github.push
+#      - run: |
+#          if [[ ${{github.event.before}} == "0000000000000000000000000000000000000000" ]]; then
+#            pre-commit run --show-diff-on-failure --color=always --all-files
+#          else
+#            pre-commit run --show-diff-on-failure --color=always --files $(git diff --name-only --diff-filter=ACMRT ${{github.event.before}} ${{ github.sha }} |  tr "\n" " ")
+#          fi

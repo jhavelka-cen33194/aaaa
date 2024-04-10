@@ -1,0 +1,22 @@
+name: Create environment branch from master
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  create:
+    name: Create PR to ${{ matrix.environment }} environment
+    strategy:
+      fail-fast: true
+      matrix:
+        environment: NAHRAD_ENV
+      max-parallel: 4
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: csas-actions/devops-platform-cd-common/.github/workflows/update-environment-branch.yml@master
+    with:
+      environment: ${{ matrix.environment }}

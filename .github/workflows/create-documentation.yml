@@ -1,0 +1,56 @@
+name: Create Terraform docummentation
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '!**examples**'
+      - '!.github/**'
+      - '**.tf'
+      - '**tfvars'
+    branches:
+      - master
+
+permissions: read-all
+
+jobs:
+  createUpdateREADME:
+    runs-on: csas-linux
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+    - name: Dump GitHub context
+      env:
+        GITHUB_CONTEXT: ${{ toJson(github) }}
+      run: echo "$GITHUB_CONTEXT"
+
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # Whole history is needed for Sonar scan
+        ssh-key: ${{ secrets.CSAS_INET_DEV_SSH }}
+
+    - name: Render terraform docs inside the README.md and push changes back to PR branch
+      uses: terraform-docs/gh-actions@v1.0.0
+      with:
+        config-file: .terraform-docs.yml
+        working-dir: .
+        output-file: README.md
+        output-method: inject
+
+    - name: Finalize Readme
+      id: finalize
+      run: |
+        # We will remove unnecessary lines and turn comments into normal text.
+        #  must use temp files, which we will rename as last step
+        egrep -v "// only for Unit test|// In real usage uncomment|for_each[ ]*= local|source[ ]*= \"../\"" README.md | \
+        sed '/^  \/\/for_each\|^  \/\/source/s/\/\/[ ]*//' | \
+        sed -E '/^  \/\/version/s/\/\/[ ]*(version[ ]*=[ ]*"[\~> ]*[0-9\.]+").*/\1/'> README_temp.md
+        mv README_temp.md README.md
+
+    - name: Commit
+      uses: EndBug/add-and-commit@v9
+      with:
+        message: "docs: automated action"
+        add: 'README.md'
