@@ -1,23 +1,39 @@
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 version: 2
 updates:
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "daily"
-    groups:
-      all-dependencies:
-        patterns:
-          - "*"
+#  - package-ecosystem: github-actions
+#    directory: /
+#    groups:
+#      github-actions:
+#        patterns:
+#          - "*"  # Group all Actions updates into a single larger pull request
+#    schedule:
+#      interval: weekly
 
-  - package-ecosystem: "npm"
+  - package-ecosystem: github-actions
+    directory: /files
+    groups:
+      github-actions-for-TF:
+        patterns:
+          - "*"  # Group all Actions updates into a single larger pull request
+    schedule:
+      interval: weekly
+    reviewers:
+      - "csas-dev/inet_adm"
+
+  - package-ecosystem: "terraform"
     directory: "/"
     schedule:
       interval: "daily"
+    reviewers:
+      - "csas-dev/inet_adm"
+
+  - package-ecosystem: "terraform"
+    directory: "/examples"
+    schedule:
+      interval: "daily"
     groups:
-      production-dependencies:
-        dependency-type: "production"
-      development-dependencies:
-        dependency-type: "development"
-    commit-message:
-      prefix: "fix(deps)"
-      prefix-development: "build(deps-dev)"
+      terraform:
+        patterns:
+          - "*"  # Group all Actions updates into a single larger pull request
+  

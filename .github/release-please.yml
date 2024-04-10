@@ -1,11 +1,5 @@
 # https://github.com/googleapis/repo-automation-bots/tree/main/packages/release-please#configuration
 handleGHRelease: true
-releaseType: node
+releaseType: terraform-module
 extraFiles:
-  - type: json
-    path: cli/package.json
-    jsonpath: $.version
-  - type: json
-    path: package-lock.json
-    jsonpath: $.packages.cli.version
-  - .github/workflows/helm-upgrade-apps.yml
+  - examples/main.tf

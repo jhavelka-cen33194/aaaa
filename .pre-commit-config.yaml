@@ -1,45 +1,59 @@
-# See https://pre-commit.com for more information
-# See https://pre-commit.com/hooks.html for more hooks
 default_install_hook_types:
   - pre-commit
   - commit-msg
+default_stages: [pre-commit]
 repos:
-  - repo: https://github.com/compilerla/conventional-pre-commit
-    rev: v3.1.0
+  - repo: meta
     hooks:
-      - id: conventional-pre-commit
+    -   id: check-useless-excludes
+
+  - repo: https://github.com/jorisroovers/gitlint
+    rev:  v0.19.1
+    hooks:
+    -   id: gitlint
         stages: [ commit-msg ]
-        args: [ ] # optional: list of Conventional Commits types to allow e.g. [feat, fix, ci, chore, test]
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v3.2.0
     hooks:
-      - id: trailing-whitespace
-        exclude: ^dist/
-      - id: end-of-file-fixer
-        exclude: ^dist/
-      - id: check-yaml
-        exclude: /fixtures/invalid.yml$
-      - id: check-json
-      - id: check-added-large-files
-        exclude: ^dist/.*\.js(\.map)?$
-      - id: check-shebang-scripts-are-executable
-      - id: forbid-new-submodules
-      - id: check-case-conflict
+    -   id: trailing-whitespace
+    -   id: check-added-large-files
+    -   id: check-merge-conflict
+    -   id: check-yaml
+    -   id: check-xml
+    -   id: check-json
+
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.76.0
+    hooks:
+      - id: terraform_fmt
+      # Hledání chyb v kódu pomocí statické analýzy kodu
+      - id: terraform_tflint
+        args:
+          - --args=--module
+          - --args=--config=__GIT_WORKING_DIR__/.tflint.hcl
+      # Hledání security chyb v kódu pomocí statické analýzy kodu
+      - id: terraform_checkov
+        args:
+          - --args=--skip-check CKV_GIT_5 #nechceme aby 2 delali approvals
+          - --args=--skip-check CKV_GIT_1 #Mame i Internal repa, nejen Private
+          - --args=--skip-check CKV_GIT_6 #Sign commity zatim nepouzivame TBD az bude novejsi git bash vCS vyzkouset. Plus diskutuji jeste s Markem, co si o tom mysli
+          - --args=--skip-check CKV_GIT_4 #TBD musis doresit jak predem encryptnout data
+          - --args=--skip-check CKV_SECRET_6
+          #https://docs.github.com/en/rest/actions/secrets#create-or-update-an-organization-secret,
+          #https://github.com/integrations/terraform-provider-github/pull/807,
+          #https://github.com/integrations/terraform-provider-github/issues/888
+          - --args=--quiet
+          - --args=--skip-download
+
   - repo: https://github.com/igorshubovych/markdownlint-cli
-    rev: v0.39.0
+    rev: v0.32.2
     hooks:
       - id: markdownlint
-        exclude: ^CHANGELOG.md
-  - repo: https://github.com/pre-commit/mirrors-eslint
-    rev: v9.0.0-beta.1
+        exclude: CHANGELOG.md
+
+  - repo: https://github.com/jumanjihouse/pre-commit-hooks
+    rev: 3.0.0
     hooks:
-      - id: eslint
-        files: \.[jt]sx?$  # *.js, *.jsx, *.ts and *.tsx
-        exclude: ^test/fixtures/|^dist/
-        types: [ file ]
-        additional_dependencies:
-          - eslint
-          - jest
-          - eslint-plugin-github
-          - eslint-plugin-jest
-          - '@typescript-eslint/parser'
+      - id: shellcheck
+      - id: shfmt
